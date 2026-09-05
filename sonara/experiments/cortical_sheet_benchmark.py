@@ -144,7 +144,7 @@ def _trained_hippocampal_system(
     rng.shuffle(order)
     for family in order:
         sheet.reset_state()
-        sheet.settle(
+        cortical_winners = sheet.settle(
             noisy_experience(
                 rng,
                 sensory,
@@ -158,9 +158,13 @@ def _trained_hippocampal_system(
             learn=True,
             recurrent=True,
         )
-        # Hippocampus receives the richer integrated cortical state rather than
-        # only the final global winner mask. Sparse separation belongs to DG.
-        hippocampus.learn(sheet.state.copy())
+        # Hippocampus receives the rich integrated cortical state while output
+        # plasticity is driven by the cortical cells that actually won at the
+        # same moment. No semantic identity or family label is supplied.
+        hippocampus.learn(
+            sheet.state.copy(),
+            cortical_active_indices=cortical_winners,
+        )
 
     hippocampus.finalize_learning()
     return rng, sheet, hippocampus, sensory, other
