@@ -8,6 +8,7 @@ from .cortical_sheet import (
     assembly_overlap,
     separation_metrics,
 )
+from .hippocampal_loop import HippocampalLoop
 
 
 def normalize(vector: np.ndarray) -> np.ndarray:
@@ -109,13 +110,15 @@ def separation_trial(seed: int, present: tuple[str, ...]) -> float:
     return separation_metrics(assemblies, sheet.winner_budget).separation
 
 
-def completion_trial(seed: int, recurrent: bool) -> tuple[float, float]:
-    """
-    Diagnostic for a future hippocampal-like completion mechanism.
-
-    The current recurrent Hebbian rule is intentionally evaluated rather than
-    assumed to be pattern completion.
-    """
+def _trained_hippocampal_system(
+    seed: int,
+) -> tuple[
+    np.random.Generator,
+    FastCorticalSheet,
+    HippocampalLoop,
+    list[np.ndarray],
+    dict[str, list[np.ndarray]],
+]:
     rng = np.random.default_rng(seed)
     feature_size = 12
     families = 6
@@ -128,8 +131,15 @@ def completion_trial(seed: int, recurrent: bool) -> tuple[float, float]:
         recurrent_learning_rate=0.20,
         recurrence_cold_gain=2.0,
     )
+    hippocampus = HippocampalLoop(
+        input_size=sheet.size,
+        cortical_winner_count=sheet.winner_budget,
+        seed=900 + seed,
+    )
     sensory, other = experience_prototypes(rng, families, feature_size)
 
+    # The cortical sheet and hippocampal loop see the same interleaved stream of
+    # unlabeled experiences. No family identifier reaches either mechanism.
     order = np.tile(np.arange(families), 20)
     rng.shuffle(order)
     for family in order:
@@ -148,11 +158,32 @@ def completion_trial(seed: int, recurrent: bool) -> tuple[float, float]:
             learn=True,
             recurrent=True,
         )
+        hippocampus.learn(sheet.activity.copy())
 
-    references: list[np.ndarray] = []
+    hippocampus.finalize_learning()
+    return rng, sheet, hippocampus, sensory, other
+
+
+def completion_trial(seed: int, recurrent: bool) -> tuple[float, float]:
+    """
+    End-to-end partial-cue completion through the experimental hippocampal loop.
+
+    Full experiences first converge in the cortical sheet. DG expands/separates
+    those cortical states, CA3 forms sparse recurrent attractors, and learned
+    sparse CA3 output routes try to reactivate the corresponding distributed
+    cortical state. Retrieval receives only sensory + context streams.
+
+    The recurrence-OFF condition uses the exact same learned system and seed; it
+    differs only by withholding CA3 settling.
+    """
+    feature_size = 12
+    families = 6
+    rng, sheet, hippocampus, sensory, other = _trained_hippocampal_system(seed)
+
+    cortical_references: list[np.ndarray] = []
     for family in range(families):
         sheet.reset_state()
-        references.append(
+        cortical_references.append(
             sheet.settle(
                 noisy_experience(
                     rng,
@@ -172,7 +203,7 @@ def completion_trial(seed: int, recurrent: bool) -> tuple[float, float]:
     margins: list[float] = []
     for family in range(families):
         sheet.reset_state()
-        retrieved = sheet.settle(
+        sheet.settle(
             noisy_experience(
                 rng,
                 sensory,
@@ -183,15 +214,82 @@ def completion_trial(seed: int, recurrent: bool) -> tuple[float, float]:
                 noise=0.08,
             ),
             cue_steps=2,
-            blank_steps=10,
+            recurrent=True,
+        )
+        recalled = hippocampus.recall(
+            sheet.activity.copy(),
             recurrent=recurrent,
+            settle_steps=5,
         )
         overlaps = np.asarray(
             [
-                assembly_overlap(reference, retrieved, sheet.winner_budget)
-                for reference in references
+                assembly_overlap(
+                    reference,
+                    recalled.cortical_winner_indices,
+                    sheet.winner_budget,
+                )
+                for reference in cortical_references
             ]
         )
         correct += int(np.argmax(overlaps) == family)
         margins.append(overlaps[family] - np.max(np.delete(overlaps, family)))
     return correct / families, float(np.mean(margins))
+
+
+def internal_ca3_completion_trial(seed: int, recurrent: bool) -> float:
+    """Measure whether recurrence expands a partial CA3 seed toward its full cue state."""
+    feature_size = 12
+    families = 6
+    rng, sheet, hippocampus, sensory, other = _trained_hippocampal_system(seed)
+
+    full_ca3: list[np.ndarray] = []
+    for family in range(families):
+        sheet.reset_state()
+        sheet.settle(
+            noisy_experience(
+                rng,
+                sensory,
+                other,
+                family,
+                feature_size,
+                ("sensory", "context", "body", "time"),
+                noise=0.02,
+            ),
+            cue_steps=5,
+            recurrent=True,
+        )
+        full_ca3.append(
+            hippocampus.recall(
+                sheet.activity.copy(), recurrent=True, settle_steps=5
+            ).ca3_winner_indices
+        )
+
+    overlaps: list[float] = []
+    for family in range(families):
+        sheet.reset_state()
+        sheet.settle(
+            noisy_experience(
+                rng,
+                sensory,
+                other,
+                family,
+                feature_size,
+                ("sensory", "context"),
+                noise=0.08,
+            ),
+            cue_steps=2,
+            recurrent=True,
+        )
+        recalled = hippocampus.recall(
+            sheet.activity.copy(),
+            recurrent=recurrent,
+            settle_steps=5,
+        )
+        overlaps.append(
+            assembly_overlap(
+                full_ca3[family],
+                recalled.ca3_winner_indices,
+                hippocampus.ca3_assembly_size,
+            )
+        )
+    return float(np.mean(overlaps))
