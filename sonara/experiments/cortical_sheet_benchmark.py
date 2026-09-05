@@ -13,7 +13,7 @@ from .hippocampal_loop import HippocampalLoop
 
 def normalize(vector: np.ndarray) -> np.ndarray:
     value = np.asarray(vector, dtype=np.float64)
-    return value / np.linalg.norm(value)
+    return value / np.linalg.norm(vector)
 
 
 def default_streams(feature_size: int = 12) -> tuple[StreamSpec, ...]:
@@ -30,12 +30,7 @@ def experience_prototypes(
     families: int,
     feature_size: int,
 ) -> tuple[list[np.ndarray], dict[str, list[np.ndarray]]]:
-    """
-    Build deliberately ambiguous experiences.
-
-    Sensory prototypes are almost identical across families. Context, body,
-    and temporal streams contain independent family-specific evidence.
-    """
+    """Build deliberately ambiguous experiences."""
     common_sensory = normalize(rng.normal(size=feature_size))
     sensory = [
         normalize(common_sensory + 0.05 * rng.normal(size=feature_size))
@@ -133,14 +128,12 @@ def _trained_hippocampal_system(
     )
     hippocampus = HippocampalLoop(
         input_size=sheet.size,
-        dg_winner_count=32,
+        novelty_threshold=0.50,
         cortical_winner_count=sheet.winner_budget,
         seed=900 + seed,
     )
     sensory, other = experience_prototypes(rng, families, feature_size)
 
-    # The cortical sheet and hippocampal loop see the same interleaved stream of
-    # unlabeled experiences. No family identifier reaches either mechanism.
     order = np.tile(np.arange(families), 20)
     rng.shuffle(order)
     for family in order:
@@ -169,7 +162,6 @@ def _trained_hippocampal_system(
 
 
 def completion_trial(seed: int, recurrent: bool) -> tuple[float, float]:
-    """End-to-end partial-cue completion through the experimental hippocampal loop."""
     feature_size = 12
     families = 6
     rng, sheet, hippocampus, sensory, other = _trained_hippocampal_system(seed)
@@ -231,7 +223,6 @@ def completion_trial(seed: int, recurrent: bool) -> tuple[float, float]:
 
 
 def internal_ca3_completion_trial(seed: int, recurrent: bool) -> float:
-    """Measure how much a partial cue overlaps its full-cue CA3 state."""
     feature_size = 12
     families = 6
     rng, sheet, hippocampus, sensory, other = _trained_hippocampal_system(seed)
@@ -290,12 +281,6 @@ def internal_ca3_completion_trial(seed: int, recurrent: bool) -> float:
 
 
 def ca3_identity_trial(seed: int, recurrent: bool) -> tuple[float, float, float, int]:
-    """
-    Test whether CA3 completion preserves episode identity rather than merely activity.
-
-    Returns classification accuracy, same-vs-next-best overlap margin, mean
-    between-family full-cue overlap, and the number of unsupervised traces formed.
-    """
     feature_size = 12
     families = 6
     rng, sheet, hippocampus, sensory, other = _trained_hippocampal_system(seed)
