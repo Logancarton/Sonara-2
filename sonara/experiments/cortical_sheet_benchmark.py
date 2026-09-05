@@ -133,6 +133,7 @@ def _trained_hippocampal_system(
     )
     hippocampus = HippocampalLoop(
         input_size=sheet.size,
+        dg_winner_count=32,
         cortical_winner_count=sheet.winner_budget,
         seed=900 + seed,
     )
