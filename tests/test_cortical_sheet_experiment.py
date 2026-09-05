@@ -5,6 +5,7 @@ from sonara.experiments.cortical_sheet import FastCorticalSheet, StreamSpec
 from sonara.experiments.cortical_sheet_benchmark import (
     completion_trial,
     default_streams,
+    internal_ca3_completion_trial,
     normalize,
     separation_trial,
 )
@@ -86,11 +87,24 @@ def test_units_farther_from_anchored_inputs_have_longer_intrinsic_persistence():
     assert sheet.state[cold] > sheet.state[hot] * 5.0
 
 
+def test_dg_ca3_recurrence_completes_more_of_the_internal_assembly():
+    recurrent = np.asarray(
+        [internal_ca3_completion_trial(seed, True) for seed in range(6)]
+    )
+    feed_forward = np.asarray(
+        [internal_ca3_completion_trial(seed, False) for seed in range(6)]
+    )
+
+    assert float(np.mean(recurrent)) >= 0.75
+    assert float(np.mean(recurrent)) >= float(np.mean(feed_forward)) + 0.40
+
+
 @pytest.mark.xfail(
     strict=True,
     reason=(
-        "The first recurrent Hebbian loop maintains activity but does not yet "
-        "reliably complete the correct learned experience from a partial cue."
+        "Internal CA3 completion is now tested separately, but the stronger gate "
+        "still requires completed CA3 activity to improve end-to-end cortical "
+        "reactivation from the same degraded cue."
     ),
 )
 def test_recurrence_must_eventually_complete_the_correct_partial_cue():
