@@ -6,6 +6,7 @@ import numpy as np
 
 from sonara.experiments.cortical_sheet import FastCorticalSheet, StreamSpec
 from sonara.experiments.cortical_sheet_benchmark import (
+    ca3_identity_trial,
     completion_trial,
     normalize,
     separation_trial,
@@ -27,9 +28,25 @@ def main() -> None:
         values = [separation_trial(seed, present) for seed in range(6)]
         print(f"  {len(present)} stream(s): separation={np.mean(values):.3f}")
 
+    identity_on = np.asarray([ca3_identity_trial(seed, True) for seed in range(3)])
+    identity_off = np.asarray([ca3_identity_trial(seed, False) for seed in range(3)])
+    print("\nCA3 episode-identity diagnostic (partial sensory + context cue):")
+    print(
+        "  recurrence ON : "
+        f"accuracy={np.mean(identity_on[:, 0]):.3f}, "
+        f"margin={np.mean(identity_on[:, 1]):.3f}, "
+        f"between_overlap={np.mean(identity_on[:, 2]):.3f}"
+    )
+    print(
+        "  recurrence OFF: "
+        f"accuracy={np.mean(identity_off[:, 0]):.3f}, "
+        f"margin={np.mean(identity_off[:, 1]):.3f}"
+    )
+    print(f"  learned trace count mean={np.mean(identity_on[:, 3]):.1f}")
+
     recurrent = np.asarray([completion_trial(seed, True) for seed in range(6)])
     no_recurrence = np.asarray([completion_trial(seed, False) for seed in range(6)])
-    print("\nPartial-cue completion diagnostic (sensory + context only):")
+    print("\nEnd-to-end cortical reactivation from the same degraded cue:")
     print(
         "  recurrence ON : "
         f"accuracy={np.mean(recurrent[:, 0]):.3f}, "
@@ -40,7 +57,7 @@ def main() -> None:
         f"accuracy={np.mean(no_recurrence[:, 0]):.3f}, "
         f"margin={np.mean(no_recurrence[:, 1]):.3f}"
     )
-    print("  completion gate: NOT YET PROVED")
+    print("  end-to-end completion gate: NOT YET PROVED")
 
     feature_size = 16
     streams = (
