@@ -158,9 +158,6 @@ def _trained_hippocampal_system(
             learn=True,
             recurrent=True,
         )
-        # Hippocampus receives the rich integrated cortical state while output
-        # plasticity is driven by the cortical cells that actually won at the
-        # same moment. No semantic identity or family label is supplied.
         hippocampus.learn(
             sheet.state.copy(),
             cortical_active_indices=cortical_winners,
@@ -171,17 +168,7 @@ def _trained_hippocampal_system(
 
 
 def completion_trial(seed: int, recurrent: bool) -> tuple[float, float]:
-    """
-    End-to-end partial-cue completion through the experimental hippocampal loop.
-
-    Full experiences first converge in the cortical sheet. DG expands/separates
-    those cortical states, CA3 forms sparse recurrent attractors, and learned
-    sparse CA3 output routes try to reactivate the corresponding distributed
-    cortical state. Retrieval receives only sensory + context streams.
-
-    The recurrence-OFF condition uses the exact same learned system and seed; it
-    differs only by withholding CA3 settling.
-    """
+    """End-to-end partial-cue completion through the experimental hippocampal loop."""
     feature_size = 12
     families = 6
     rng, sheet, hippocampus, sensory, other = _trained_hippocampal_system(seed)
@@ -243,7 +230,7 @@ def completion_trial(seed: int, recurrent: bool) -> tuple[float, float]:
 
 
 def internal_ca3_completion_trial(seed: int, recurrent: bool) -> float:
-    """Measure whether recurrence expands a partial CA3 seed toward its full cue state."""
+    """Measure how much a partial cue overlaps its full-cue CA3 state."""
     feature_size = 12
     families = 6
     rng, sheet, hippocampus, sensory, other = _trained_hippocampal_system(seed)
@@ -299,3 +286,90 @@ def internal_ca3_completion_trial(seed: int, recurrent: bool) -> float:
             )
         )
     return float(np.mean(overlaps))
+
+
+def ca3_identity_trial(seed: int, recurrent: bool) -> tuple[float, float, float, int]:
+    """
+    Test whether CA3 completion preserves episode identity rather than merely activity.
+
+    Returns classification accuracy, same-vs-next-best overlap margin, mean
+    between-family full-cue overlap, and the number of unsupervised traces formed.
+    """
+    feature_size = 12
+    families = 6
+    rng, sheet, hippocampus, sensory, other = _trained_hippocampal_system(seed)
+
+    references: list[np.ndarray] = []
+    for family in range(families):
+        sheet.reset_state()
+        sheet.settle(
+            noisy_experience(
+                rng,
+                sensory,
+                other,
+                family,
+                feature_size,
+                ("sensory", "context", "body", "time"),
+                noise=0.02,
+            ),
+            cue_steps=5,
+            recurrent=True,
+        )
+        references.append(
+            hippocampus.recall(
+                sheet.state.copy(), recurrent=True, settle_steps=5
+            ).ca3_winner_indices
+        )
+
+    between: list[float] = []
+    for left in range(families):
+        for right in range(left + 1, families):
+            between.append(
+                assembly_overlap(
+                    references[left],
+                    references[right],
+                    hippocampus.ca3_assembly_size,
+                )
+            )
+
+    correct = 0
+    margins: list[float] = []
+    for family in range(families):
+        sheet.reset_state()
+        sheet.settle(
+            noisy_experience(
+                rng,
+                sensory,
+                other,
+                family,
+                feature_size,
+                ("sensory", "context"),
+                noise=0.08,
+            ),
+            cue_steps=2,
+            recurrent=True,
+        )
+        recalled = hippocampus.recall(
+            sheet.state.copy(),
+            recurrent=recurrent,
+            settle_steps=5,
+        )
+        overlaps = np.asarray(
+            [
+                assembly_overlap(
+                    reference,
+                    recalled.ca3_winner_indices,
+                    hippocampus.ca3_assembly_size,
+                )
+                for reference in references
+            ]
+        )
+        correct += int(np.argmax(overlaps) == family)
+        margins.append(overlaps[family] - np.max(np.delete(overlaps, family)))
+
+    return (
+        correct / families,
+        float(np.mean(margins)),
+        float(np.mean(between)),
+        hippocampus.trace_count,
+    )
