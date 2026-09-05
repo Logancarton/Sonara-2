@@ -158,7 +158,9 @@ def _trained_hippocampal_system(
             learn=True,
             recurrent=True,
         )
-        hippocampus.learn(sheet.activity.copy())
+        # Hippocampus receives the richer integrated cortical state rather than
+        # only the final global winner mask. Sparse separation belongs to DG.
+        hippocampus.learn(sheet.state.copy())
 
     hippocampus.finalize_learning()
     return rng, sheet, hippocampus, sensory, other
@@ -217,7 +219,7 @@ def completion_trial(seed: int, recurrent: bool) -> tuple[float, float]:
             recurrent=True,
         )
         recalled = hippocampus.recall(
-            sheet.activity.copy(),
+            sheet.state.copy(),
             recurrent=recurrent,
             settle_steps=5,
         )
@@ -260,7 +262,7 @@ def internal_ca3_completion_trial(seed: int, recurrent: bool) -> float:
         )
         full_ca3.append(
             hippocampus.recall(
-                sheet.activity.copy(), recurrent=True, settle_steps=5
+                sheet.state.copy(), recurrent=True, settle_steps=5
             ).ca3_winner_indices
         )
 
@@ -281,7 +283,7 @@ def internal_ca3_completion_trial(seed: int, recurrent: bool) -> float:
             recurrent=True,
         )
         recalled = hippocampus.recall(
-            sheet.activity.copy(),
+            sheet.state.copy(),
             recurrent=recurrent,
             settle_steps=5,
         )
