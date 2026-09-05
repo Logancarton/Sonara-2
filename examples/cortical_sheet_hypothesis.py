@@ -4,8 +4,8 @@ import time
 
 import numpy as np
 
-from experiments.cortical_sheet import FastCorticalSheet, StreamSpec
-from experiments.cortical_sheet_benchmark import (
+from sonara.experiments.cortical_sheet import FastCorticalSheet, StreamSpec
+from sonara.experiments.cortical_sheet_benchmark import (
     completion_trial,
     normalize,
     separation_trial,

@@ -25,7 +25,7 @@ jobs:
         run: python -m pytest -q
 
       - name: Compile
-        run: python -m compileall -q sonara experiments tests examples
+        run: python -m compileall -q sonara tests examples
 
       - name: Stage 0 live cascade gate
         run: python -m examples.first_cascade

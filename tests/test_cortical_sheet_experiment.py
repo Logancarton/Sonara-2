@@ -1,8 +1,8 @@
 import numpy as np
 import pytest
 
-from experiments.cortical_sheet import FastCorticalSheet, StreamSpec
-from experiments.cortical_sheet_benchmark import (
+from sonara.experiments.cortical_sheet import FastCorticalSheet, StreamSpec
+from sonara.experiments.cortical_sheet_benchmark import (
     completion_trial,
     default_streams,
     normalize,
