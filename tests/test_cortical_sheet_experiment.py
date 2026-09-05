@@ -3,6 +3,7 @@ import pytest
 
 from sonara.experiments.cortical_sheet import FastCorticalSheet, StreamSpec
 from sonara.experiments.cortical_sheet_benchmark import (
+    ca3_identity_trial,
     completion_trial,
     default_streams,
     internal_ca3_completion_trial,
@@ -87,7 +88,7 @@ def test_units_farther_from_anchored_inputs_have_longer_intrinsic_persistence():
     assert sheet.state[cold] > sheet.state[hot] * 5.0
 
 
-def test_dg_ca3_recurrence_completes_more_of_the_internal_assembly():
+def test_ca3_recurrence_expands_partial_seed_toward_full_cue_state():
     recurrent = np.asarray(
         [internal_ca3_completion_trial(seed, True) for seed in range(6)]
     )
@@ -102,9 +103,30 @@ def test_dg_ca3_recurrence_completes_more_of_the_internal_assembly():
 @pytest.mark.xfail(
     strict=True,
     reason=(
-        "Internal CA3 completion is now tested separately, but the stronger gate "
-        "still requires completed CA3 activity to improve end-to-end cortical "
-        "reactivation from the same degraded cue."
+        "Recurrence can expand a seed, but it must also recover the correct "
+        "distinct episode rather than the same or wrong attractor."
+    ),
+)
+def test_ca3_recurrence_must_preserve_distinct_episode_identity():
+    recurrent = np.asarray([ca3_identity_trial(seed, True) for seed in range(6)])
+    feed_forward = np.asarray([ca3_identity_trial(seed, False) for seed in range(6)])
+
+    recurrent_accuracy = float(np.mean(recurrent[:, 0]))
+    feed_forward_accuracy = float(np.mean(feed_forward[:, 0]))
+    recurrent_margin = float(np.mean(recurrent[:, 1]))
+    between_overlap = float(np.mean(recurrent[:, 2]))
+
+    assert recurrent_accuracy >= 0.75
+    assert recurrent_accuracy >= feed_forward_accuracy + 0.10
+    assert recurrent_margin >= 0.10
+    assert between_overlap <= 0.25
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "The strongest gate requires the correct completed CA3 episode to "
+        "reactivate the corresponding distributed cortical state."
     ),
 )
 def test_recurrence_must_eventually_complete_the_correct_partial_cue():
