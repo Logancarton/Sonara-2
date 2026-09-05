@@ -152,9 +152,27 @@ class HippocampalLoop:
         indices = np.argpartition(scores, -count)[-count:]
         return indices[np.argsort(-scores[indices], kind="stable")]
 
+    def _dentate_input(self, cortical_state: np.ndarray) -> np.ndarray:
+        """
+        Preserve distributed cortical state while emphasizing its sparse coalition.
+
+        The cortical sheet already proved that multiple converging streams create
+        more distinct winner coalitions. DG should not let the large shared
+        sensory/background component drown those episode-specific differences.
+        The transformation therefore mixes the normalized continuous state with
+        an unlabeled sparse signal made from the currently strongest cortical
+        cells. Both components have unit norm before mixing.
+        """
+        cortical = self._normalize(cortical_state, self.input_size)
+        cortical_winners = self._top_k(cortical, self.cortical_winner_count)
+        sparse_signal = np.zeros(self.input_size, dtype=np.float32)
+        sparse_signal[cortical_winners] = 1.0 / np.sqrt(self.cortical_winner_count)
+        mixed = 0.35 * cortical + 0.65 * sparse_signal
+        return self._normalize(mixed, self.input_size)
+
     def dentate_code(self, cortical_state: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         """Expand a cortical state into a much larger, very sparse DG code."""
-        cortical = self._normalize(cortical_state, self.input_size)
+        cortical = self._dentate_input(cortical_state)
         scores = np.sum(
             self._dg_weights * cortical[self._dg_source_indices],
             axis=1,
@@ -221,16 +239,10 @@ class HippocampalLoop:
         mean_state = self._trace_cortical_mean[trace_index]
         winner_counts = self._trace_cortical_winner_counts[trace_index]
 
-        # Stable cortical members are selected by repeated winner frequency with
-        # mean integrated state as a deterministic tie-breaker. No semantic
-        # identity enters this decision.
         max_count = max(float(np.max(winner_counts)), 1.0)
         stable_score = winner_counts / max_count + 1e-3 * np.maximum(mean_state, 0.0)
         stable_cortex = self._top_k(stable_score, self.cortical_winner_count)
 
-        # Spread the stable cortical assembly over the whole CA3 attractor. A
-        # small feed-forward CA3 seed therefore exposes only part of the learned
-        # cortical route set; recurrent completion recruits the rest.
         total_routes = self.ca3_assembly_size * self.cortical_fan_out
         ordered = stable_cortex[np.argsort(-stable_score[stable_cortex], kind="stable")]
         route_pool = np.resize(ordered, total_routes)
