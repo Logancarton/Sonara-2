@@ -109,14 +109,13 @@ class HippocampalLoop:
             (self.ca3_size, self.ca3_size), dtype=np.float32
         )
 
-        # Each CA3 cell has a sparse fixed set of potential cortical output
-        # targets. Learning changes only the weights on those routes. A partial
-        # CA3 seed therefore produces a partial cortical reconstruction; the
-        # completed CA3 assembly can recruit many more learned routes.
-        self._cortical_targets = self.rng.integers(
-            0,
-            self.input_size,
-            size=(self.ca3_size, self.cortical_fan_out),
+        # Potential CA3 -> cortical routes begin unassigned. When a new CA3
+        # attractor forms, its sparse outbound routes are distributed across the
+        # cortical neurons that are actually co-active in that experience. This
+        # keeps the reconstruction learned rather than random or semantic.
+        self._cortical_targets = np.full(
+            (self.ca3_size, self.cortical_fan_out),
+            -1,
             dtype=np.int32,
         )
         self._cortical_output_weights = np.zeros(
@@ -189,23 +188,73 @@ class HippocampalLoop:
         self._allocated_ca3[assembly] = True
         return assembly
 
-    def learn(self, cortical_state: np.ndarray) -> np.ndarray:
+    def _validated_cortical_indices(
+        self,
+        cortical: np.ndarray,
+        cortical_active_indices: np.ndarray | None,
+    ) -> np.ndarray:
+        if cortical_active_indices is None:
+            return self._top_k(cortical, self.cortical_winner_count)
+
+        active = np.asarray(cortical_active_indices, dtype=np.int64)
+        if active.ndim != 1 or active.size == 0:
+            raise ValueError("cortical_active_indices must be a non-empty 1-D array")
+        if np.any(active < 0) or np.any(active >= self.input_size):
+            raise IndexError("cortical active index outside input range")
+        return np.unique(active)
+
+    def _assign_cortical_routes(
+        self,
+        assembly: np.ndarray,
+        active_cortex: np.ndarray,
+    ) -> None:
+        """Spread an episode's active cortical targets across its CA3 assembly."""
+        total_routes = self.ca3_assembly_size * self.cortical_fan_out
+        shuffled = self.rng.permutation(active_cortex)
+        repeats = int(np.ceil(total_routes / shuffled.size))
+        route_pool = np.tile(shuffled, repeats)[:total_routes]
+        self.rng.shuffle(route_pool)
+        self._cortical_targets[assembly] = route_pool.reshape(
+            self.ca3_assembly_size,
+            self.cortical_fan_out,
+        )
+
+    def learn(
+        self,
+        cortical_state: np.ndarray,
+        *,
+        cortical_active_indices: np.ndarray | None = None,
+    ) -> np.ndarray:
         """
         Learn one experience without labels.
 
         Similar DG states reinforce an existing CA3 attractor. A sufficiently
-        novel DG state allocates another sparse CA3 assembly. This allocation is
-        an experimental stand-in for novelty/excitability-driven ensemble
-        recruitment; recall itself does not perform a trace lookup.
+        novel DG state allocates another sparse CA3 assembly. When the attractor
+        is first allocated, sparse outbound routes are learned from the cortical
+        neurons that are actually active at the same moment.
         """
         if self._finalized:
             raise RuntimeError("cannot learn after finalize_learning()")
 
         cortical = self._normalize(cortical_state, self.input_size)
+        active_cortex = self._validated_cortical_indices(
+            cortical,
+            cortical_active_indices,
+        )
         dg_code, _ = self.dentate_code(cortical)
         similarities = self._prototype_similarity(dg_code)
+        new_trace = not (
+            similarities.size
+            and float(np.max(similarities)) >= self.novelty_threshold
+        )
 
-        if similarities.size and float(np.max(similarities)) >= self.novelty_threshold:
+        if new_trace:
+            assembly = self._allocate_ca3_assembly()
+            self._trace_assemblies.append(assembly)
+            self._trace_prototypes.append(dg_code.copy())
+            self._trace_counts.append(1)
+            self._assign_cortical_routes(assembly, active_cortex)
+        else:
             trace_index = int(np.argmax(similarities))
             assembly = self._trace_assemblies[trace_index]
             count = self._trace_counts[trace_index]
@@ -213,11 +262,6 @@ class HippocampalLoop:
                 (self._trace_prototypes[trace_index] * count + dg_code) / (count + 1)
             ).astype(np.float32)
             self._trace_counts[trace_index] = count + 1
-        else:
-            assembly = self._allocate_ca3_assembly()
-            self._trace_assemblies.append(assembly)
-            self._trace_prototypes.append(dg_code.copy())
-            self._trace_counts.append(1)
 
         eta = self.learning_rate
         dg_target = self._normalize(dg_code, self.dg_size)
@@ -234,13 +278,13 @@ class HippocampalLoop:
         self.ca3_recurrent_weights[np.ix_(assembly, assembly)] += 0.10
         np.fill_diagonal(self.ca3_recurrent_weights, 0.0)
 
-        # CA3 -> cortex is deliberately sparse/divergent rather than a dense
-        # copy. The complete assembly is therefore useful in a way that a tiny
-        # seed is not.
-        cortical_targets = cortical[self._cortical_targets[assembly]]
+        cortical_targets = self._cortical_targets[assembly]
+        if np.any(cortical_targets < 0):
+            raise RuntimeError("allocated CA3 assembly is missing cortical output routes")
+        target_activity = cortical[cortical_targets]
         self._cortical_output_weights[assembly] = (
             (1.0 - eta) * self._cortical_output_weights[assembly]
-            + eta * cortical_targets
+            + eta * target_activity
         ).astype(np.float32)
         return assembly.copy()
 
@@ -287,9 +331,11 @@ class HippocampalLoop:
                 activity[winner_indices] = 1.0
 
         active_ca3 = np.flatnonzero(activity > 0.0)
+        active_targets = self._cortical_targets[active_ca3]
+        valid_routes = active_targets >= 0
         cortical_reactivation = np.bincount(
-            self._cortical_targets[active_ca3].ravel(),
-            weights=self._cortical_output_weights[active_ca3].ravel(),
+            active_targets[valid_routes],
+            weights=self._cortical_output_weights[active_ca3][valid_routes],
             minlength=self.input_size,
         ).astype(np.float32)
         cortical_winners = self._top_k(
