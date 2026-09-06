@@ -115,8 +115,6 @@ class ParallelBundleMemoryNetwork:
         self.return_learning_rate = float(return_learning_rate)
         self.rng = np.random.default_rng(int(seed))
 
-        # Cortex -> DG is a sparse excitatory graph. Every active cortical
-        # source fans out; DG cells sum whatever routes converge on them.
         self.dg_source_edges = np.repeat(
             np.arange(self.cortical_size, dtype=np.int32),
             self.dg_fan_out,
@@ -135,7 +133,6 @@ class ParallelBundleMemoryNetwork:
         self.dg_edge_weights = dg_weights
         self._scale_dg_incoming()
 
-        # Direct cortical/entorhinal seed into CA3 is also sparse and excitatory.
         self.ca3_direct_source_edges = np.repeat(
             np.arange(self.cortical_size, dtype=np.int32),
             self.ca3_direct_fan_out,
@@ -160,7 +157,6 @@ class ParallelBundleMemoryNetwork:
         )
         self.ca3_direct_weights = direct_weights.reshape(-1)
 
-        # Mossy-fiber-like DG -> CA3 path: sparse, strong, excitatory fan-in.
         self.ca3_dg_sources = self.rng.integers(
             0,
             self.dg_size,
@@ -176,8 +172,6 @@ class ParallelBundleMemoryNetwork:
             np.linalg.norm(self.ca3_dg_weights, axis=1, keepdims=True), 1e-12
         )
 
-        # CA3 recurrence is a sparse structural graph. Only existing routes can
-        # potentiate, and each source has a finite recurrent output budget.
         self.ca3_recurrent_source_edges = np.repeat(
             np.arange(self.ca3_size, dtype=np.int32),
             self.ca3_recurrent_fan_out,
@@ -201,9 +195,6 @@ class ParallelBundleMemoryNetwork:
         self.cortical_return_weights = np.zeros(
             (self.cortical_size, self.ca3_size), dtype=np.float32
         )
-
-        # Usage is slow competitive state. Eligibility traces are fast transient
-        # state and are never a second long-term memory store.
         self.dg_usage = np.zeros(self.dg_size, dtype=np.float32)
         self.ca3_usage = np.zeros(self.ca3_size, dtype=np.float32)
         self.cortical_trace = np.zeros(self.cortical_size, dtype=np.float32)
@@ -246,7 +237,6 @@ class ParallelBundleMemoryNetwork:
         current: np.ndarray,
         decay: float,
     ) -> np.ndarray:
-        """Keep recent activity alive while letting unsupported activity fade."""
         trace *= decay
         np.maximum(trace, np.asarray(current, dtype=np.float32), out=trace)
         return trace
@@ -323,7 +313,6 @@ class ParallelBundleMemoryNetwork:
         dg = previous_dentate.as_dense(self.dg_size)
         cortical = cortical_bundle.as_dense(self.cortical_size)
         ca3 = previous_ca3.as_dense(self.ca3_size)
-
         mossy_scores = np.sum(
             self.ca3_dg_weights * dg[self.ca3_dg_sources],
             axis=1,
@@ -333,7 +322,6 @@ class ParallelBundleMemoryNetwork:
         if previous_ca3.width:
             scores += self.recurrent_gain * self._recurrent_ca3_scores(ca3)
         scores /= 1.0 + self.ca3_homeostatic_pressure * self.ca3_usage
-
         count = (
             self.ca3_winner_count
             if previous_dentate.width or previous_ca3.width
@@ -355,11 +343,7 @@ class ParallelBundleMemoryNetwork:
         scores = self.cortical_return_weights @ ca3_bundle.as_dense(self.ca3_size)
         return self._top_bundle(scores, self.cortical_return_width, emitted_ms)
 
-    def _learn_dg_routes(
-        self,
-        cortical_pre: np.ndarray,
-        dentate_post: np.ndarray,
-    ) -> None:
+    def _learn_dg_routes(self, cortical_pre: np.ndarray, dentate_post: np.ndarray) -> None:
         pre = cortical_pre[self.dg_source_edges]
         post = dentate_post[self.dg_target_edges]
         eligible = (pre > 0.0) & (post > 0.0)
@@ -433,7 +417,6 @@ class ParallelBundleMemoryNetwork:
                 * coactivity
                 * (1.0 - self.ca3_recurrent_weights[eligible])
             )
-
         rows = self.ca3_recurrent_weights.reshape(
             self.ca3_size, self.ca3_recurrent_fan_out
         )
@@ -480,12 +463,10 @@ class ParallelBundleMemoryNetwork:
             and int(np.max(cortical_bundle.indices)) >= self.cortical_size
         ):
             raise IndexError("cortical bundle outside cortical population")
-
         self.time_ms += float(dt_ms)
         now = self.time_ms
         previous_dentate = self.dentate
         previous_ca3 = self.ca3
-
         cortical_return = self._cortical_return(previous_ca3, now)
         cortical_state = self._update_cortical_trace(cortical_bundle)
         next_dentate = self._dentate_from_cortical_state(cortical_state, now)
@@ -495,14 +476,9 @@ class ParallelBundleMemoryNetwork:
             previous_ca3,
             now,
         )
-
-        # Snapshot pre traces before the new postsynaptic bundles are merged in.
-        # This keeps the causal order: lingering earlier activity can modify a
-        # route when a later bundle arrives.
         cortical_current = cortical_bundle.as_dense(self.cortical_size)
         next_dg_current = next_dentate.as_dense(self.dg_size)
         next_ca3_current = next_ca3.as_dense(self.ca3_size)
-
         self._decay_and_refresh(
             self.cortical_eligibility,
             cortical_current,
@@ -510,38 +486,31 @@ class ParallelBundleMemoryNetwork:
         )
         self.dentate_eligibility *= self.eligibility_decay
         self.ca3_eligibility *= self.eligibility_decay
-
         cortical_pre = self.cortical_eligibility.copy()
         dentate_pre = self.dentate_eligibility.copy()
         ca3_pre = self.ca3_eligibility.copy()
-
-        dentate_post = np.maximum(
+        if learn:
+            self._learn_dg_routes(cortical_pre, next_dg_current)
+            self._learn_mossy_afferents(dentate_pre, next_ca3_current)
+            self._learn_direct_cortical_afferents(cortical_pre, next_ca3_current)
+            self._learn_recurrent_routes(ca3_pre, next_ca3_current)
+            self._learn_cortical_return(ca3_pre, cortical_current)
+        self.dentate_eligibility[:] = np.maximum(
             dentate_pre,
             next_dg_current,
-        ).astype(np.float32)
-        ca3_post = np.maximum(
+        )
+        self.ca3_eligibility[:] = np.maximum(
             ca3_pre,
             next_ca3_current,
-        ).astype(np.float32)
-
-        if learn:
-            self._learn_dg_routes(cortical_pre, dentate_post)
-            self._learn_mossy_afferents(dentate_pre, ca3_post)
-            self._learn_direct_cortical_afferents(cortical_pre, ca3_post)
-            self._learn_recurrent_routes(ca3_pre, ca3_post)
-            self._learn_cortical_return(ca3_pre, cortical_pre)
-
-        # Carry the new postsynaptic activity forward into the next millisecond.
-        self.dentate_eligibility[:] = dentate_post
-        self.ca3_eligibility[:] = ca3_post
-
-        self.dg_usage = (
-            0.995 * self.dg_usage
-            + 0.005
-            * np.isin(
-                np.arange(self.dg_size), next_dentate.indices
-            ).astype(np.float32)
         )
+        if learn:
+            self.dg_usage = (
+                0.995 * self.dg_usage
+                + 0.005
+                * np.isin(
+                    np.arange(self.dg_size), next_dentate.indices
+                ).astype(np.float32)
+            )
         self.ca3_usage = (
             0.995 * self.ca3_usage
             + 0.005
@@ -549,7 +518,6 @@ class ParallelBundleMemoryNetwork:
                 np.arange(self.ca3_size), next_ca3.indices
             ).astype(np.float32)
         )
-
         self.dentate = next_dentate
         self.ca3 = next_ca3
         return ParallelBundleMemoryStep(
