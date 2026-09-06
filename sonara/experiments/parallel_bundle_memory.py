@@ -22,9 +22,10 @@ class ParallelBundleMemoryNetwork:
     Experimental DG/CA3 branch for a live broad-bundle cortical substrate.
 
     Cortex remains the sole cortical owner. Cortical bundles diverge through
-    registered excitatory edges into DG, DG expands/separates them, sparse
-    powerful DG->CA3 routes converge with a weaker direct cortical seed and CA3
-    recurrence, and CA3 emits a learned broad return toward cortex.
+    registered excitatory edges into DG, DG expands/separates a short decaying
+    history of that live flow, sparse powerful DG->CA3 routes converge with a
+    weaker direct cortical seed and CA3 recurrence, and CA3 emits a learned
+    broad return toward cortex.
 
     Long-range cortical/DG afferents are excitatory. Separation and suppression
     are owned by sparse expansion, convergence, competition, and homeostatic
@@ -39,6 +40,7 @@ class ParallelBundleMemoryNetwork:
         dg_size: int = 2048,
         dg_winner_count: int = 64,
         dg_fan_out: int = 32,
+        cortical_trace_decay: float = 0.75,
         ca3_size: int = 512,
         ca3_winner_count: int = 16,
         ca3_direct_seed_count: int = 4,
@@ -60,6 +62,8 @@ class ParallelBundleMemoryNetwork:
             raise ValueError("invalid cortical_winner_count")
         if not 0 < dg_winner_count <= dg_size:
             raise ValueError("invalid dg_winner_count")
+        if not 0 <= cortical_trace_decay < 1.0:
+            raise ValueError("cortical_trace_decay must be in [0, 1)")
         if not 0 < ca3_direct_seed_count <= ca3_winner_count <= ca3_size:
             raise ValueError("invalid CA3 winner/seed counts")
         if dg_fan_out <= 0 or ca3_dg_fan_in <= 0 or ca3_direct_fan_out <= 0:
@@ -76,6 +80,7 @@ class ParallelBundleMemoryNetwork:
         self.dg_size = int(dg_size)
         self.dg_winner_count = int(dg_winner_count)
         self.dg_fan_out = int(dg_fan_out)
+        self.cortical_trace_decay = float(cortical_trace_decay)
         self.ca3_size = int(ca3_size)
         self.ca3_winner_count = int(ca3_winner_count)
         self.ca3_direct_seed_count = int(ca3_direct_seed_count)
@@ -181,6 +186,7 @@ class ParallelBundleMemoryNetwork:
             (self.cortical_size, self.ca3_size), dtype=np.float32
         )
         self.ca3_usage = np.zeros(self.ca3_size, dtype=np.float32)
+        self.cortical_trace = np.zeros(self.cortical_size, dtype=np.float32)
 
         self.time_ms = 0.0
         self.dentate = self._empty_bundle()
@@ -221,16 +227,26 @@ class ParallelBundleMemoryNetwork:
         self.time_ms = 0.0
         self.dentate = self._empty_bundle()
         self.ca3 = self._empty_bundle()
+        self.cortical_trace.fill(0.0)
         if reset_usage:
             self.ca3_usage.fill(0.0)
 
-    def _dentate_from_cortex(
+    def _update_cortical_trace(self, cortical_bundle: SignalBundle) -> np.ndarray:
+        """Integrate a short, label-free history of the live cortical cascade."""
+        current = cortical_bundle.as_dense(self.cortical_size)
+        self.cortical_trace *= self.cortical_trace_decay
+        self.cortical_trace += current
+        peak = float(np.max(self.cortical_trace))
+        if peak > 1e-12:
+            self.cortical_trace /= peak
+        return self.cortical_trace
+
+    def _dentate_from_cortical_state(
         self,
-        cortical_bundle: SignalBundle,
+        cortical_state: np.ndarray,
         emitted_ms: float,
     ) -> SignalBundle:
-        cortical = cortical_bundle.as_dense(self.cortical_size)
-        edge_signal = self.dg_edge_weights * cortical[self.dg_source_edges]
+        edge_signal = self.dg_edge_weights * cortical_state[self.dg_source_edges]
         scores = np.bincount(
             self.dg_target_edges,
             weights=edge_signal,
@@ -411,7 +427,8 @@ class ParallelBundleMemoryNetwork:
         previous_ca3 = self.ca3
 
         cortical_return = self._cortical_return(previous_ca3, now)
-        next_dentate = self._dentate_from_cortex(cortical_bundle, now)
+        cortical_trace = self._update_cortical_trace(cortical_bundle)
+        next_dentate = self._dentate_from_cortical_state(cortical_trace, now)
         next_ca3 = self._ca3_from_inputs(
             previous_dentate,
             cortical_bundle,
