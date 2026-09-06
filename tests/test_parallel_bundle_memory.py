@@ -26,6 +26,7 @@ def test_live_cortex_and_hippocampal_branch_advance_as_delayed_broad_bundles():
         dg_winner_count=32,
         ca3_size=128,
         ca3_winner_count=16,
+        ca3_direct_seed_count=4,
         seed=403,
     )
     cue = normalize(rng.normal(size=8))
@@ -45,11 +46,11 @@ def test_live_cortex_and_hippocampal_branch_advance_as_delayed_broad_bundles():
 
     assert history[0][0].bundle.width > 1
     assert history[0][1].dentate.width > 1
-    assert history[0][1].ca3.width == 0
+    assert 1 < history[0][1].ca3.width <= memory.ca3_direct_seed_count
 
     assert history[1][0].bundle.width > 1
     assert history[1][1].dentate.width > 1
-    assert history[1][1].ca3.width > 1
+    assert history[1][1].ca3.width > history[0][1].ca3.width
 
     assert history[-1][0].bundle.width > 1
     assert history[-1][1].cortical_return.width > 1
