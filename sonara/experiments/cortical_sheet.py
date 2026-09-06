@@ -30,12 +30,87 @@ class StreamSpec:
 
 
 @dataclass(frozen=True)
+class SignalBundle:
+    """
+    Sparse population packet emitted at one neural moment.
+
+    A bundle is intentionally broader than a single spike trail: many source
+    cells can be active together with graded amplitudes. Projection fans the
+    whole packet through every registered outgoing edge at once.
+    """
+
+    indices: np.ndarray
+    amplitudes: np.ndarray
+    emitted_ms: float
+
+    def __post_init__(self) -> None:
+        indices = np.asarray(self.indices, dtype=np.int64)
+        amplitudes = np.asarray(self.amplitudes, dtype=np.float32)
+        if indices.ndim != 1 or amplitudes.ndim != 1:
+            raise ValueError("bundle indices and amplitudes must both be 1-D")
+        if indices.size != amplitudes.size:
+            raise ValueError("bundle indices and amplitudes must have equal length")
+        if np.any(indices < 0):
+            raise IndexError("bundle indices must be non-negative")
+        if np.unique(indices).size != indices.size:
+            raise ValueError("bundle indices must be unique")
+        if not np.all(np.isfinite(amplitudes)) or np.any(amplitudes < 0.0):
+            raise ValueError("bundle amplitudes must be finite and non-negative")
+        if not np.isfinite(float(self.emitted_ms)):
+            raise ValueError("bundle emitted_ms must be finite")
+        object.__setattr__(self, "indices", indices.copy())
+        object.__setattr__(self, "amplitudes", amplitudes.copy())
+        object.__setattr__(self, "emitted_ms", float(self.emitted_ms))
+
+    @property
+    def width(self) -> int:
+        return int(self.indices.size)
+
+    @property
+    def total_activity(self) -> float:
+        return float(np.sum(self.amplitudes))
+
+    def as_dense(self, size: int) -> np.ndarray:
+        if size <= 0:
+            raise ValueError("size must be > 0")
+        if self.indices.size and int(np.max(self.indices)) >= size:
+            raise IndexError("bundle index outside target population")
+        dense = np.zeros(size, dtype=np.float32)
+        dense[self.indices] = self.amplitudes
+        return dense
+
+    @classmethod
+    def merge(
+        cls,
+        bundles: Sequence[SignalBundle],
+        *,
+        size: int,
+        emitted_ms: float | None = None,
+    ) -> SignalBundle:
+        """Sum several simultaneous population packets into one converged bundle."""
+        if size <= 0:
+            raise ValueError("size must be > 0")
+        dense = np.zeros(size, dtype=np.float32)
+        latest = 0.0
+        for bundle in bundles:
+            dense += bundle.as_dense(size)
+            latest = max(latest, bundle.emitted_ms)
+        active = np.flatnonzero(dense > 0.0)
+        return cls(
+            active,
+            dense[active],
+            latest if emitted_ms is None else float(emitted_ms),
+        )
+
+
+@dataclass(frozen=True)
 class SheetStep:
     time_ms: float
     winner_indices: np.ndarray
     winner_activity: np.ndarray
     active_fraction: float
     mean_winner_coldness: float
+    bundle: SignalBundle
 
 
 @dataclass(frozen=True)
@@ -58,7 +133,7 @@ class FastCorticalSheet:
 
     Runtime math is vectorized:
     - one dense matrix-vector product per present input stream,
-    - edge-array gather + bincount for sparse recurrent propagation,
+    - edge-array gather + bincount for broad sparse-bundle propagation,
     - one top-k competition over the sheet.
 
     There are no Python loops over neurons during a step.
@@ -171,6 +246,9 @@ class FastCorticalSheet:
         ).astype(np.float32)
 
         self.state = np.zeros(self.size, dtype=np.float32)
+        # Dense runtime backing for the current sparse SignalBundle. Keeping the
+        # vector dense makes edge gather/bincount propagation fast while the
+        # externally visible packet remains sparse.
         self.activity = np.zeros(self.size, dtype=np.float32)
         self.usage = np.zeros(self.size, dtype=np.float32)
 
@@ -287,7 +365,30 @@ class FastCorticalSheet:
         drive = branch_sum + self.coincidence_gain * pair_coincidence
         return drive.astype(np.float32), branches, normalized
 
+    def current_bundle(self) -> SignalBundle:
+        active = np.flatnonzero(self.activity > 0.0)
+        return SignalBundle(active, self.activity[active], self.time_ms)
+
+    def project_bundle(self, bundle: SignalBundle) -> SignalBundle:
+        """
+        Fan one broad packet through every outgoing recurrent edge at once.
+
+        A source cell may contribute to many targets, and many source cells may
+        converge on the same target. No single-cell trail is selected.
+        """
+        source_activity = bundle.as_dense(self.size)
+        edge_signal = self.recurrent_weights * source_activity[self.source_edges]
+        current = np.bincount(
+            self.target_edges,
+            weights=edge_signal,
+            minlength=self.size,
+        ).astype(np.float32)
+        current *= self.recurrence_gain
+        active = np.flatnonzero(current > 0.0)
+        return SignalBundle(active, current[active], self.time_ms)
+
     def recurrent_current(self) -> np.ndarray:
+        # Fast path for the current bundle: self.activity is its dense backing.
         edge_signal = self.recurrent_weights * self.activity[self.source_edges]
         current = np.bincount(
             self.target_edges,
@@ -347,6 +448,7 @@ class FastCorticalSheet:
             self._learn_afferents(selected, branches, normalized_inputs)
             self._learn_recurrent_edges()
 
+        bundle = self.current_bundle()
         return SheetStep(
             time_ms=self.time_ms,
             winner_indices=selected.copy(),
@@ -355,6 +457,7 @@ class FastCorticalSheet:
             mean_winner_coldness=(
                 float(np.mean(self.coldness[selected])) if selected.size else 0.0
             ),
+            bundle=bundle,
         )
 
     def _learn_afferents(
