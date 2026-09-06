@@ -14,7 +14,45 @@ class FeedbackCorticalSheet(FastCorticalSheet):
     This keeps cortical state, competition, recurrent propagation, and learning
     in the cortical owner. The memory branch can only contribute current; it
     cannot directly mutate cortical state or select cortical winners.
+
+    The live feedback experiment also carries a short recurrent eligibility
+    trace. Recently active cortical sources can therefore strengthen an existing
+    route when its downstream target joins the cascade a few milliseconds later.
     """
+
+    def __init__(
+        self,
+        *args,
+        recurrent_eligibility_decay: float = 0.82,
+        **kwargs,
+    ) -> None:
+        super().__init__(*args, **kwargs)
+        if not 0.0 <= recurrent_eligibility_decay < 1.0:
+            raise ValueError("recurrent_eligibility_decay must be in [0, 1)")
+        self.recurrent_eligibility_decay = float(recurrent_eligibility_decay)
+        self.recurrent_eligibility = np.zeros(self.size, dtype=np.float32)
+
+    def _update_recurrent_eligibility(self) -> None:
+        self.recurrent_eligibility *= self.recurrent_eligibility_decay
+        np.maximum(
+            self.recurrent_eligibility,
+            self.activity,
+            out=self.recurrent_eligibility,
+        )
+
+    def _learn_temporal_recurrent_edges(self) -> None:
+        post = self.activity[self.target_edges]
+        pre = self.recurrent_eligibility[self.source_edges]
+        eligible = (pre > 0.0) & (post > 0.0)
+        if not np.any(eligible):
+            return
+        coactivity = pre[eligible] * post[eligible]
+        self.recurrent_weights[eligible] += (
+            self.recurrent_learning_rate
+            * coactivity
+            * (1.0 - self.recurrent_weights[eligible])
+        )
+        np.clip(self.recurrent_weights, 0.0, 1.0, out=self.recurrent_weights)
 
     def step(
         self,
@@ -69,13 +107,15 @@ class FeedbackCorticalSheet(FastCorticalSheet):
             peak = max(float(np.max(selected_scores)), 1e-12)
             self.activity[selected] = selected_scores / peak
 
+        self._update_recurrent_eligibility()
+
         self.usage = (
             0.995 * self.usage + 0.005 * (self.activity > 0.0).astype(np.float32)
         )
 
         if learn and selected.size:
             self._learn_afferents(selected, branches, normalized_inputs)
-            self._learn_recurrent_edges()
+            self._learn_temporal_recurrent_edges()
 
         bundle = self.current_bundle()
         return SheetStep(
@@ -88,3 +128,7 @@ class FeedbackCorticalSheet(FastCorticalSheet):
             ),
             bundle=bundle,
         )
+
+    def reset_state(self, *, reset_usage: bool = False) -> None:
+        super().reset_state(reset_usage=reset_usage)
+        self.recurrent_eligibility.fill(0.0)
