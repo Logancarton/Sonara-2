@@ -292,6 +292,7 @@ class ParallelBundleMemoryNetwork:
         external_cortical: SignalBundle | None = None,
         *,
         learn: bool = False,
+        memory_return: bool = True,
         dt_ms: float = 1.0,
     ) -> ParallelBundleStep:
         if dt_ms <= 0.0:
@@ -320,7 +321,7 @@ class ParallelBundleMemoryNetwork:
                         now,
                     )
                 )
-        if previous_ca3.width:
+        if memory_return and previous_ca3.width:
             cortical_components.append(
                 self._scale(
                     self._cortical_return(previous_ca3, now),
@@ -387,6 +388,7 @@ class ParallelBundleMemoryNetwork:
         *,
         steps: int = 10,
         driven_steps: int = 2,
+        memory_return: bool = True,
     ) -> tuple[ParallelBundleStep, ...]:
         if steps <= 0 or not 0 < driven_steps <= steps:
             raise ValueError("require steps > 0 and 0 < driven_steps <= steps")
@@ -397,6 +399,7 @@ class ParallelBundleMemoryNetwork:
                 self.advance(
                     cortical_bundle if tick < driven_steps else None,
                     learn=False,
+                    memory_return=memory_return,
                 )
             )
         return tuple(trajectory)
@@ -407,9 +410,11 @@ class ParallelBundleMemoryNetwork:
         *,
         steps: int = 10,
         driven_steps: int = 2,
+        memory_return: bool = True,
     ) -> ParallelBundleStep:
         return self.recall_trajectory(
             cortical_bundle,
             steps=steps,
             driven_steps=driven_steps,
+            memory_return=memory_return,
         )[-1]
