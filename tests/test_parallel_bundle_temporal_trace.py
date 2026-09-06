@@ -19,7 +19,7 @@ def test_same_current_cortical_bundle_reaches_dg_differently_after_different_rec
         cortical_winner_count=8,
         dg_size=256,
         dg_winner_count=24,
-        dg_fan_out=24,
+        dg_fan_in=24,
         cortical_trace_decay=0.75,
         ca3_size=64,
         ca3_winner_count=8,
