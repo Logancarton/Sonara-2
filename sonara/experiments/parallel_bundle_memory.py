@@ -21,13 +21,14 @@ class ParallelBundleMemoryNetwork:
     """
     Experimental DG/CA3 branch for a live broad-bundle cortical substrate.
 
-    Cortex remains the sole cortical owner. DG expands/separates its bundle;
-    sparse powerful DG->CA3 routes converge with a weaker direct cortical seed
-    and CA3 recurrence; CA3 then emits a learned broad return toward cortex.
+    Cortex remains the sole cortical owner. Cortical bundles diverge through
+    registered excitatory edges into DG, DG expands/separates them, sparse
+    powerful DG->CA3 routes converge with a weaker direct cortical seed and CA3
+    recurrence, and CA3 emits a learned broad return toward cortex.
 
     Long-range cortical/DG afferents are excitatory. Separation and suppression
-    are owned by sparse competition and homeostatic pressure rather than by
-    embedding arbitrary negative weights in excitatory anatomical pathways.
+    are owned by sparse expansion, convergence, competition, and homeostatic
+    pressure rather than arbitrary signed feed-forward weights.
     """
 
     def __init__(
@@ -37,7 +38,7 @@ class ParallelBundleMemoryNetwork:
         cortical_winner_count: int,
         dg_size: int = 2048,
         dg_winner_count: int = 64,
-        dg_fan_in: int = 32,
+        dg_fan_out: int = 32,
         ca3_size: int = 512,
         ca3_winner_count: int = 16,
         ca3_direct_seed_count: int = 4,
@@ -61,8 +62,10 @@ class ParallelBundleMemoryNetwork:
             raise ValueError("invalid dg_winner_count")
         if not 0 < ca3_direct_seed_count <= ca3_winner_count <= ca3_size:
             raise ValueError("invalid CA3 winner/seed counts")
-        if dg_fan_in <= 0 or ca3_dg_fan_in <= 0 or ca3_direct_fan_out <= 0:
+        if dg_fan_out <= 0 or ca3_dg_fan_in <= 0 or ca3_direct_fan_out <= 0:
             raise ValueError("fan-in/fan-out values must be > 0")
+        if dg_fan_out > dg_size:
+            raise ValueError("dg_fan_out cannot exceed dg_size")
         if ca3_direct_fan_out > ca3_size:
             raise ValueError("ca3_direct_fan_out cannot exceed ca3_size")
         if dentate_gain < 0.0 or direct_cortical_gain < 0.0 or recurrent_gain < 0.0:
@@ -72,6 +75,7 @@ class ParallelBundleMemoryNetwork:
         self.cortical_winner_count = int(cortical_winner_count)
         self.dg_size = int(dg_size)
         self.dg_winner_count = int(dg_winner_count)
+        self.dg_fan_out = int(dg_fan_out)
         self.ca3_size = int(ca3_size)
         self.ca3_winner_count = int(ca3_winner_count)
         self.ca3_direct_seed_count = int(ca3_direct_seed_count)
@@ -90,20 +94,38 @@ class ParallelBundleMemoryNetwork:
         self.return_learning_rate = float(return_learning_rate)
         self.rng = np.random.default_rng(int(seed))
 
-        self._dg_sources = self.rng.integers(
-            0,
-            self.cortical_size,
-            size=(self.dg_size, dg_fan_in),
-            dtype=np.int32,
+        # Cortex -> DG is a true sparse projection graph. Every active cortical
+        # source diverges to several DG targets, and DG cells sum converging
+        # currents. Target-wise L2 normalization prevents accidental high-degree
+        # DG hubs from winning simply because of construction variance.
+        self.dg_source_edges = np.repeat(
+            np.arange(self.cortical_size, dtype=np.int32),
+            self.dg_fan_out,
         )
-        self._dg_weights = self.rng.uniform(
+        dg_targets = np.empty(
+            (self.cortical_size, self.dg_fan_out), dtype=np.int32
+        )
+        for source_id in range(self.cortical_size):
+            dg_targets[source_id] = self.rng.choice(
+                self.dg_size,
+                size=self.dg_fan_out,
+                replace=False,
+            )
+        self.dg_target_edges = dg_targets.reshape(-1)
+        dg_weights = self.rng.uniform(
             0.5,
             1.0,
-            size=(self.dg_size, dg_fan_in),
+            size=self.dg_source_edges.size,
         ).astype(np.float32)
-        self._dg_weights /= np.maximum(
-            np.linalg.norm(self._dg_weights, axis=1, keepdims=True),
-            1e-12,
+        target_norm = np.sqrt(
+            np.bincount(
+                self.dg_target_edges,
+                weights=np.square(dg_weights),
+                minlength=self.dg_size,
+            )
+        ).astype(np.float32)
+        self.dg_edge_weights = dg_weights / np.maximum(
+            target_norm[self.dg_target_edges], 1e-12
         )
 
         # Sparse direct cortical/entorhinal fan-out preserves source identity:
@@ -208,10 +230,12 @@ class ParallelBundleMemoryNetwork:
         emitted_ms: float,
     ) -> SignalBundle:
         cortical = cortical_bundle.as_dense(self.cortical_size)
-        scores = np.sum(
-            self._dg_weights * cortical[self._dg_sources],
-            axis=1,
-        )
+        edge_signal = self.dg_edge_weights * cortical[self.dg_source_edges]
+        scores = np.bincount(
+            self.dg_target_edges,
+            weights=edge_signal,
+            minlength=self.dg_size,
+        ).astype(np.float32)
         return self._top_bundle(scores, self.dg_winner_count, emitted_ms)
 
     def _direct_cortical_scores(self, cortical: np.ndarray) -> np.ndarray:
