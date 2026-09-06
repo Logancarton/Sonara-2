@@ -25,7 +25,7 @@ class ParallelBundleMemoryNetwork:
     Cortex, DG-like expansion, CA3-like recurrence, and cortical return all
     advance from the previous tick's bundle state. The hippocampal branch never
     blocks cortical propagation and there is no episode/trace chooser.
-    Learning is local co-activity plus competitive afferent specialization.
+    Learning is local co-activity plus competitive afferent/recurrent plasticity.
     """
 
     def __init__(
@@ -37,8 +37,8 @@ class ParallelBundleMemoryNetwork:
         dg_size: int = 2048,
         dg_winner_count: int = 64,
         dg_fan_in: int = 32,
-        ca3_size: int = 384,
-        ca3_winner_count: int = 32,
+        ca3_size: int = 512,
+        ca3_winner_count: int = 16,
         cortical_return_width: int | None = None,
         recurrent_gain: float = 1.6,
         cortical_recurrence_gain: float = 0.75,
@@ -249,6 +249,26 @@ class ParallelBundleMemoryNetwork:
         )
         self.ca3_afferent_weights[ca3.indices] = updated.astype(np.float32)
 
+    def _learn_competitive_recurrence(
+        self,
+        previous_ca3: SignalBundle,
+        next_ca3: SignalBundle,
+    ) -> None:
+        if previous_ca3.width == 0 or next_ca3.width == 0:
+            return
+        source_amplitudes = previous_ca3.amplitudes.astype(np.float32)
+        target_activity = next_ca3.as_dense(self.ca3_size)
+        expected_activity = float(next_ca3.width / self.ca3_size)
+        centered_target = target_activity - expected_activity
+        delta = self.recurrent_learning_rate * np.outer(
+            centered_target,
+            source_amplitudes,
+        ).astype(np.float32)
+        columns = previous_ca3.indices
+        self.ca3_recurrent_weights[:, columns] += delta
+        np.clip(self.ca3_recurrent_weights, -1.0, 1.0, out=self.ca3_recurrent_weights)
+        np.fill_diagonal(self.ca3_recurrent_weights, 0.0)
+
     def _learn_local_routes(
         self,
         previous_dentate: SignalBundle,
@@ -257,16 +277,7 @@ class ParallelBundleMemoryNetwork:
         next_cortical: SignalBundle,
     ) -> None:
         self._specialize_ca3_afferents(previous_dentate, next_ca3)
-        self._hebbian_saturating_update(
-            self.ca3_recurrent_weights,
-            next_ca3.indices,
-            previous_ca3.indices,
-            next_ca3.amplitudes,
-            previous_ca3.amplitudes,
-            self.recurrent_learning_rate,
-        )
-        if self.ca3_recurrent_weights.size:
-            np.fill_diagonal(self.ca3_recurrent_weights, 0.0)
+        self._learn_competitive_recurrence(previous_ca3, next_ca3)
         self._hebbian_saturating_update(
             self.cortical_return_weights,
             next_cortical.indices,
