@@ -5,12 +5,15 @@ from sonara.experiments.cortical_sheet import (
     FastCorticalSheet,
     SignalBundle,
     StreamSpec,
+    assembly_overlap,
 )
 from sonara.experiments.cortical_sheet_benchmark import (
+    _trained_hippocampal_system,
     ca3_identity_trial,
     completion_trial,
     default_streams,
     internal_ca3_completion_trial,
+    noisy_experience,
     normalize,
     separation_trial,
 )
@@ -141,6 +144,92 @@ def test_separate_broad_bundles_reconverge_by_summing_on_shared_targets():
     np.testing.assert_allclose(merged_dense, left_dense + right_dense, rtol=1e-6, atol=1e-7)
     assert np.all(merged_dense[shared] > left_dense[shared])
     assert np.all(merged_dense[shared] > right_dense[shared])
+
+
+def test_broad_partial_bundle_preserves_more_ca3_trace_than_one_cell_trail():
+    broad_overlaps: list[float] = []
+    narrow_overlaps: list[float] = []
+
+    for seed in range(4):
+        feature_size = 12
+        families = 6
+        rng, sheet, hippocampus, sensory, other = _trained_hippocampal_system(seed)
+
+        full_ca3: list[np.ndarray] = []
+        for family in range(families):
+            sheet.reset_state()
+            sheet.settle(
+                noisy_experience(
+                    rng,
+                    sensory,
+                    other,
+                    family,
+                    feature_size,
+                    ("sensory", "context", "body", "time"),
+                    noise=0.02,
+                ),
+                cue_steps=5,
+                recurrent=True,
+            )
+            full_ca3.append(
+                hippocampus.recall(
+                    sheet.state.copy(), recurrent=True, settle_steps=5
+                ).ca3_winner_indices
+            )
+
+        for family in range(families):
+            sheet.reset_state()
+            sheet.settle(
+                noisy_experience(
+                    rng,
+                    sensory,
+                    other,
+                    family,
+                    feature_size,
+                    ("sensory", "context"),
+                    noise=0.08,
+                ),
+                cue_steps=2,
+                recurrent=True,
+            )
+
+            active = np.flatnonzero(sheet.activity > 0.0)
+            broad = SignalBundle(
+                active,
+                sheet.activity[active],
+                sheet.time_ms,
+            )
+            strongest = int(active[np.argmax(sheet.activity[active])])
+            narrow = SignalBundle(
+                np.asarray([strongest], dtype=np.int64),
+                np.asarray([sheet.activity[strongest]], dtype=np.float32),
+                sheet.time_ms,
+            )
+
+            broad_recall = hippocampus.recall(
+                broad.as_dense(sheet.size), recurrent=True, settle_steps=5
+            )
+            narrow_recall = hippocampus.recall(
+                narrow.as_dense(sheet.size), recurrent=True, settle_steps=5
+            )
+            broad_overlaps.append(
+                assembly_overlap(
+                    full_ca3[family],
+                    broad_recall.ca3_winner_indices,
+                    hippocampus.ca3_assembly_size,
+                )
+            )
+            narrow_overlaps.append(
+                assembly_overlap(
+                    full_ca3[family],
+                    narrow_recall.ca3_winner_indices,
+                    hippocampus.ca3_assembly_size,
+                )
+            )
+
+    broad_mean = float(np.mean(broad_overlaps))
+    narrow_mean = float(np.mean(narrow_overlaps))
+    assert broad_mean > narrow_mean + 0.10, (broad_mean, narrow_mean)
 
 
 def test_units_farther_from_anchored_inputs_have_longer_intrinsic_persistence():
