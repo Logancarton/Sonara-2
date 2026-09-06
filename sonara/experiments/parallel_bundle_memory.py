@@ -25,7 +25,7 @@ class ParallelBundleMemoryNetwork:
     Cortex, DG-like expansion, CA3-like recurrence, and cortical return all
     advance from the previous tick's bundle state. The hippocampal branch never
     blocks cortical propagation and there is no episode/trace chooser.
-    Learning is local Hebbian reinforcement of co-active bundle routes.
+    Learning is local co-activity plus competitive afferent specialization.
     """
 
     def __init__(
@@ -44,7 +44,7 @@ class ParallelBundleMemoryNetwork:
         cortical_recurrence_gain: float = 0.75,
         cortical_return_gain: float = 1.25,
         cortical_persistence: float = 0.35,
-        ca3_homeostatic_pressure: float = 2.0,
+        ca3_homeostatic_pressure: float = 6.0,
         afferent_learning_rate: float = 0.08,
         recurrent_learning_rate: float = 0.12,
         return_learning_rate: float = 0.12,
@@ -89,8 +89,6 @@ class ParallelBundleMemoryNetwork:
             size=(self.dg_size, dg_fan_in),
             dtype=np.int32,
         )
-        # Signed, zero-mean coincidence filters prevent generic shared cortical
-        # activity from rewarding the same DG cells on every experience.
         self._dg_weights = self.rng.normal(
             0.0,
             1.0,
@@ -102,9 +100,6 @@ class ParallelBundleMemoryNetwork:
             1e-12,
         )
 
-        # CA3 begins as another bank of signed conjunction detectors. Hebbian
-        # experience can then turn repeatedly useful DG->CA3 routes positive
-        # without giving globally high-gain rows a permanent advantage.
         self.ca3_afferent_weights = self.rng.normal(
             0.0,
             1.0,
@@ -227,6 +222,33 @@ class ParallelBundleMemoryNetwork:
         block += float(learning_rate) * coactivity * (1.0 - block)
         weights[np.ix_(target_indices, source_indices)] = np.clip(block, 0.0, 1.0)
 
+    def _specialize_ca3_afferents(
+        self,
+        dentate: SignalBundle,
+        ca3: SignalBundle,
+    ) -> None:
+        if dentate.width == 0 or ca3.width == 0:
+            return
+        source = dentate.as_dense(self.dg_size)
+        source_norm = float(np.linalg.norm(source))
+        if source_norm <= 1e-12:
+            return
+        target_pattern = source / source_norm
+        target_pattern -= float(np.mean(target_pattern))
+        target_pattern /= max(float(np.linalg.norm(target_pattern)), 1e-12)
+
+        rows = self.ca3_afferent_weights[ca3.indices]
+        eta = (
+            self.afferent_learning_rate * ca3.amplitudes.astype(np.float32)
+        )[:, None]
+        updated = (1.0 - eta) * rows + eta * target_pattern[None, :]
+        updated -= np.mean(updated, axis=1, keepdims=True)
+        updated /= np.maximum(
+            np.linalg.norm(updated, axis=1, keepdims=True),
+            1e-12,
+        )
+        self.ca3_afferent_weights[ca3.indices] = updated.astype(np.float32)
+
     def _learn_local_routes(
         self,
         previous_dentate: SignalBundle,
@@ -234,14 +256,7 @@ class ParallelBundleMemoryNetwork:
         next_ca3: SignalBundle,
         next_cortical: SignalBundle,
     ) -> None:
-        self._hebbian_saturating_update(
-            self.ca3_afferent_weights,
-            next_ca3.indices,
-            previous_dentate.indices,
-            next_ca3.amplitudes,
-            previous_dentate.amplitudes,
-            self.afferent_learning_rate,
-        )
+        self._specialize_ca3_afferents(previous_dentate, next_ca3)
         self._hebbian_saturating_update(
             self.ca3_recurrent_weights,
             next_ca3.indices,
