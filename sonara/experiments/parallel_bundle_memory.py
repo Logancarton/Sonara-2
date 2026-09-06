@@ -381,6 +381,26 @@ class ParallelBundleMemoryNetwork:
                 learn=True,
             )
 
+    def recall_trajectory(
+        self,
+        cortical_bundle: SignalBundle,
+        *,
+        steps: int = 10,
+        driven_steps: int = 2,
+    ) -> tuple[ParallelBundleStep, ...]:
+        if steps <= 0 or not 0 < driven_steps <= steps:
+            raise ValueError("require steps > 0 and 0 < driven_steps <= steps")
+        self.reset_dynamic()
+        trajectory: list[ParallelBundleStep] = []
+        for tick in range(steps):
+            trajectory.append(
+                self.advance(
+                    cortical_bundle if tick < driven_steps else None,
+                    learn=False,
+                )
+            )
+        return tuple(trajectory)
+
     def recall(
         self,
         cortical_bundle: SignalBundle,
@@ -388,14 +408,8 @@ class ParallelBundleMemoryNetwork:
         steps: int = 10,
         driven_steps: int = 2,
     ) -> ParallelBundleStep:
-        if steps <= 0 or not 0 < driven_steps <= steps:
-            raise ValueError("require steps > 0 and 0 < driven_steps <= steps")
-        self.reset_dynamic()
-        result: ParallelBundleStep | None = None
-        for tick in range(steps):
-            result = self.advance(
-                cortical_bundle if tick < driven_steps else None,
-                learn=False,
-            )
-        assert result is not None
-        return result
+        return self.recall_trajectory(
+            cortical_bundle,
+            steps=steps,
+            driven_steps=driven_steps,
+        )[-1]
