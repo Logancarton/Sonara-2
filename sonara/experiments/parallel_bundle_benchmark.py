@@ -8,7 +8,7 @@ from .cortical_sheet_benchmark import (
     experience_prototypes,
     noisy_experience,
 )
-from .parallel_bundle_memory import ParallelBundleMemoryNetwork
+from .parallel_bundle_memory import ParallelBundleMemoryNetwork, ParallelBundleStep
 
 
 def _trained_parallel_system(
@@ -71,6 +71,41 @@ def _mean_between(assemblies: list[np.ndarray], budget: int) -> float:
     return float(np.mean(values)) if values else 0.0
 
 
+def _trajectory_signature(
+    trajectory: tuple[ParallelBundleStep, ...],
+    *,
+    population: str,
+    size: int,
+    start_tick: int = 2,
+) -> np.ndarray:
+    """Flatten post-cue bundle activity so identity can live across time, not one frame."""
+    if population not in {"cortical", "ca3"}:
+        raise ValueError("population must be 'cortical' or 'ca3'")
+    if not 0 <= start_tick < len(trajectory):
+        raise ValueError("start_tick outside trajectory")
+
+    frames: list[np.ndarray] = []
+    for step in trajectory[start_tick:]:
+        bundle = getattr(step, population)
+        dense = bundle.as_dense(size).astype(np.float32)
+        norm = float(np.linalg.norm(dense))
+        if norm > 1e-12:
+            dense /= norm
+        frames.append(dense)
+    signature = np.concatenate(frames)
+    norm = float(np.linalg.norm(signature))
+    if norm > 1e-12:
+        signature /= norm
+    return signature
+
+
+def _cosine(left: np.ndarray, right: np.ndarray) -> float:
+    denominator = float(np.linalg.norm(left) * np.linalg.norm(right))
+    if denominator <= 1e-12:
+        return 0.0
+    return float(np.dot(left, right) / denominator)
+
+
 def parallel_bundle_separation_diagnostic(seed: int) -> tuple[float, float, float]:
     """Measure where distinct full experiences collapse along the parallel path."""
     feature_size = 12
@@ -115,13 +150,148 @@ def parallel_bundle_separation_diagnostic(seed: int) -> tuple[float, float, floa
     )
 
 
-def parallel_bundle_completion_trial(seed: int) -> tuple[float, float, float, float]:
+def parallel_bundle_trajectory_trial(
+    seed: int,
+) -> tuple[float, float, float, float, float, float]:
     """
-    Evaluate distributed cortical and CA3 identity recovery from a partial cue.
+    Score the whole post-cue cascade rather than forcing memory into a final frame.
 
-    Ground-truth family labels are used only by the benchmark to score outputs;
-    the memory network never receives them.
+    Full and degraded cues use the same two driven ticks. The hippocampal return
+    is ablated on a second pass through the exact same learned network so any
+    improvement is attributable to the learned return branch, not the cue.
     """
+    feature_size = 12
+    families = 6
+    rng, sheet, memory, sensory, other = _trained_parallel_system(seed)
+
+    cortical_references: list[np.ndarray] = []
+    ca3_references: list[np.ndarray] = []
+    for family in range(families):
+        sheet.reset_state()
+        sheet.settle(
+            noisy_experience(
+                rng,
+                sensory,
+                other,
+                family,
+                feature_size,
+                ("sensory", "context", "body", "time"),
+                noise=0.02,
+            ),
+            cue_steps=5,
+            recurrent=True,
+        )
+        full_bundle = sheet.current_bundle()
+        trajectory = memory.recall_trajectory(
+            full_bundle,
+            steps=8,
+            driven_steps=2,
+            memory_return=True,
+        )
+        cortical_references.append(
+            _trajectory_signature(
+                trajectory,
+                population="cortical",
+                size=memory.cortical_size,
+            )
+        )
+        ca3_references.append(
+            _trajectory_signature(
+                trajectory,
+                population="ca3",
+                size=memory.ca3_size,
+            )
+        )
+
+    memory_correct = 0
+    no_return_correct = 0
+    ca3_correct = 0
+    memory_margins: list[float] = []
+    no_return_margins: list[float] = []
+    ca3_margins: list[float] = []
+
+    for family in range(families):
+        sheet.reset_state()
+        sheet.settle(
+            noisy_experience(
+                rng,
+                sensory,
+                other,
+                family,
+                feature_size,
+                ("sensory", "context"),
+                noise=0.08,
+            ),
+            cue_steps=2,
+            recurrent=True,
+        )
+        partial = sheet.current_bundle()
+
+        memory_trajectory = memory.recall_trajectory(
+            partial,
+            steps=8,
+            driven_steps=2,
+            memory_return=True,
+        )
+        no_return_trajectory = memory.recall_trajectory(
+            partial,
+            steps=8,
+            driven_steps=2,
+            memory_return=False,
+        )
+
+        cortical_signature = _trajectory_signature(
+            memory_trajectory,
+            population="cortical",
+            size=memory.cortical_size,
+        )
+        no_return_signature = _trajectory_signature(
+            no_return_trajectory,
+            population="cortical",
+            size=memory.cortical_size,
+        )
+        ca3_signature = _trajectory_signature(
+            memory_trajectory,
+            population="ca3",
+            size=memory.ca3_size,
+        )
+
+        memory_scores = np.asarray(
+            [_cosine(reference, cortical_signature) for reference in cortical_references]
+        )
+        no_return_scores = np.asarray(
+            [_cosine(reference, no_return_signature) for reference in cortical_references]
+        )
+        ca3_scores = np.asarray(
+            [_cosine(reference, ca3_signature) for reference in ca3_references]
+        )
+
+        memory_correct += int(np.argmax(memory_scores) == family)
+        no_return_correct += int(np.argmax(no_return_scores) == family)
+        ca3_correct += int(np.argmax(ca3_scores) == family)
+
+        memory_margins.append(
+            memory_scores[family] - np.max(np.delete(memory_scores, family))
+        )
+        no_return_margins.append(
+            no_return_scores[family] - np.max(np.delete(no_return_scores, family))
+        )
+        ca3_margins.append(
+            ca3_scores[family] - np.max(np.delete(ca3_scores, family))
+        )
+
+    return (
+        memory_correct / families,
+        float(np.mean(memory_margins)),
+        no_return_correct / families,
+        float(np.mean(no_return_margins)),
+        ca3_correct / families,
+        float(np.mean(ca3_margins)),
+    )
+
+
+def parallel_bundle_completion_trial(seed: int) -> tuple[float, float, float, float]:
+    """Legacy final-frame diagnostic retained to expose attractor collapse."""
     feature_size = 12
     families = 6
     rng, sheet, memory, sensory, other = _trained_parallel_system(seed)
