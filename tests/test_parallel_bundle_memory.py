@@ -2,7 +2,10 @@ import numpy as np
 
 from sonara.experiments.cortical_sheet import FastCorticalSheet, SignalBundle, StreamSpec
 from sonara.experiments.cortical_sheet_benchmark import completion_trial
-from sonara.experiments.parallel_bundle_benchmark import parallel_bundle_completion_trial
+from sonara.experiments.parallel_bundle_benchmark import (
+    parallel_bundle_completion_trial,
+    parallel_bundle_separation_diagnostic,
+)
 from sonara.experiments.parallel_bundle_memory import ParallelBundleMemoryNetwork
 
 
@@ -52,6 +55,9 @@ def test_parallel_bundle_memory_beats_serial_handoff_on_partial_cue_reconstructi
     parallel = np.asarray(
         [parallel_bundle_completion_trial(seed) for seed in range(4)]
     )
+    diagnostics = np.asarray(
+        [parallel_bundle_separation_diagnostic(seed) for seed in range(4)]
+    )
     serial = np.asarray([completion_trial(seed, True) for seed in range(4)])
 
     parallel_cortical_accuracy = float(np.mean(parallel[:, 0]))
@@ -61,14 +67,22 @@ def test_parallel_bundle_memory_beats_serial_handoff_on_partial_cue_reconstructi
     serial_accuracy = float(np.mean(serial[:, 0]))
     serial_margin = float(np.mean(serial[:, 1]))
 
-    assert parallel_cortical_accuracy >= 0.50, parallel
+    diagnostic_summary = {
+        "dg_between_overlap": float(np.mean(diagnostics[:, 0])),
+        "initial_ca3_between_overlap": float(np.mean(diagnostics[:, 1])),
+        "settled_ca3_between_overlap": float(np.mean(diagnostics[:, 2])),
+    }
+
+    assert parallel_cortical_accuracy >= 0.50, (parallel, diagnostic_summary)
     assert parallel_cortical_accuracy >= serial_accuracy + 0.15, (
         parallel_cortical_accuracy,
         serial_accuracy,
+        diagnostic_summary,
     )
     assert parallel_cortical_margin >= serial_margin + 0.05, (
         parallel_cortical_margin,
         serial_margin,
+        diagnostic_summary,
     )
-    assert parallel_ca3_accuracy >= 0.50, parallel
-    assert parallel_ca3_margin > 0.0, parallel
+    assert parallel_ca3_accuracy >= 0.50, (parallel, diagnostic_summary)
+    assert parallel_ca3_margin > 0.0, (parallel, diagnostic_summary)
