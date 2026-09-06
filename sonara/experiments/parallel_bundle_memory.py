@@ -89,21 +89,34 @@ class ParallelBundleMemoryNetwork:
             size=(self.dg_size, dg_fan_in),
             dtype=np.int32,
         )
-        self._dg_weights = self.rng.uniform(
-            0.5,
+        # Signed, zero-mean coincidence filters prevent generic shared cortical
+        # activity from rewarding the same DG cells on every experience.
+        self._dg_weights = self.rng.normal(
+            0.0,
             1.0,
             size=(self.dg_size, dg_fan_in),
         ).astype(np.float32)
+        self._dg_weights -= np.mean(self._dg_weights, axis=1, keepdims=True)
         self._dg_weights /= np.maximum(
             np.linalg.norm(self._dg_weights, axis=1, keepdims=True),
             1e-12,
         )
 
-        self.ca3_afferent_weights = self.rng.uniform(
+        # CA3 begins as another bank of signed conjunction detectors. Hebbian
+        # experience can then turn repeatedly useful DG->CA3 routes positive
+        # without giving globally high-gain rows a permanent advantage.
+        self.ca3_afferent_weights = self.rng.normal(
             0.0,
-            0.02,
+            1.0,
             size=(self.ca3_size, self.dg_size),
         ).astype(np.float32)
+        self.ca3_afferent_weights -= np.mean(
+            self.ca3_afferent_weights, axis=1, keepdims=True
+        )
+        self.ca3_afferent_weights /= np.maximum(
+            np.linalg.norm(self.ca3_afferent_weights, axis=1, keepdims=True),
+            1e-12,
+        )
         self.ca3_recurrent_weights = np.zeros(
             (self.ca3_size, self.ca3_size), dtype=np.float32
         )
