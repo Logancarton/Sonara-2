@@ -154,32 +154,34 @@ def test_live_parallel_bundle_cascade_recovers_identity_better_with_memory_retur
     ca3_accuracy = float(np.mean(rows[:, 5]))
     ca3_margin = float(np.mean(rows[:, 6]))
     serial_accuracy = float(np.mean(serial[:, 0]))
-    diagnostic = {
-        "first_cortical_accuracy": float(np.mean(first_tick[:, 0])),
-        "first_dg_accuracy": float(np.mean(first_tick[:, 1])),
-        "first_ca3_accuracy": float(np.mean(first_tick[:, 2])),
-        "trajectory_cortical_accuracy": cortical_accuracy,
-        "trajectory_dg_accuracy": dg_accuracy,
-        "trajectory_ca3_accuracy": ca3_accuracy,
-        "no_return_accuracy": no_return_accuracy,
-    }
+    diagnostic = (
+        "trajectory_cortex=%.6f trajectory_dg=%.6f trajectory_ca3=%.6f "
+        "return_off=%.6f cortex_margin=%.6f return_off_margin=%.6f "
+        "serial=%.6f first_cortex=%.6f first_dg=%.6f first_ca3=%.6f "
+        "ca3_margin=%.6f rows=%s"
+        % (
+            cortical_accuracy,
+            dg_accuracy,
+            ca3_accuracy,
+            no_return_accuracy,
+            cortical_margin,
+            no_return_margin,
+            serial_accuracy,
+            float(np.mean(first_tick[:, 0])),
+            float(np.mean(first_tick[:, 1])),
+            float(np.mean(first_tick[:, 2])),
+            ca3_margin,
+            np.array2string(rows, precision=4, suppress_small=False),
+        )
+    )
 
     assert cortical_accuracy >= 0.50, diagnostic
-    assert cortical_accuracy >= no_return_accuracy + 0.15, (
-        cortical_accuracy,
-        no_return_accuracy,
-    )
-    assert cortical_accuracy >= serial_accuracy + 0.15, (
-        cortical_accuracy,
-        serial_accuracy,
-    )
-    assert cortical_margin >= no_return_margin + 0.05, (
-        cortical_margin,
-        no_return_margin,
-    )
-    assert dg_accuracy >= 0.50, rows
-    assert ca3_accuracy >= 0.50, rows
-    assert ca3_margin > 0.0, rows
+    assert cortical_accuracy >= no_return_accuracy + 0.15, diagnostic
+    assert cortical_accuracy >= serial_accuracy + 0.15, diagnostic
+    assert cortical_margin >= no_return_margin + 0.05, diagnostic
+    assert dg_accuracy >= 0.50, diagnostic
+    assert ca3_accuracy >= 0.50, diagnostic
+    assert ca3_margin > 0.0, diagnostic
 
 
 @pytest.mark.xfail(
