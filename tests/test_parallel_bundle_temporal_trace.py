@@ -19,13 +19,14 @@ def test_same_current_cortical_bundle_reaches_dg_differently_after_different_rec
         cortical_winner_count=8,
         dg_size=256,
         dg_winner_count=24,
-        dg_fan_in=24,
+        dg_fan_out=24,
         cortical_trace_decay=0.75,
         ca3_size=64,
         ca3_winner_count=8,
         ca3_direct_seed_count=2,
         ca3_direct_fan_out=4,
         ca3_dg_fan_in=12,
+        ca3_recurrent_fan_out=8,
         seed=811,
     )
     with_history = ParallelBundleMemoryNetwork(**kwargs)
