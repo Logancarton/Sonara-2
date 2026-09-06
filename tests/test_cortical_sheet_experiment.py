@@ -1,7 +1,11 @@
 import numpy as np
 import pytest
 
-from sonara.experiments.cortical_sheet import FastCorticalSheet, StreamSpec
+from sonara.experiments.cortical_sheet import (
+    FastCorticalSheet,
+    SignalBundle,
+    StreamSpec,
+)
 from sonara.experiments.cortical_sheet_benchmark import (
     ca3_identity_trial,
     completion_trial,
@@ -72,6 +76,68 @@ def test_multistream_compartments_create_nonlinear_coincidence_drive():
     synergy = combined_drive - sensory_drive - context_drive
     assert float(np.max(synergy)) > 0.05
     assert int(np.count_nonzero(synergy > 0.0)) > 0
+
+
+def test_live_sheet_emits_a_broad_population_bundle_not_a_single_cell_trail():
+    rng = np.random.default_rng(41)
+    sheet = FastCorticalSheet(
+        24,
+        24,
+        (StreamSpec("signal", 10, (0.15, 0.50), sigma=0.30, gain=6.0),),
+        sparsity=0.05,
+        seed=42,
+        local_degree=12,
+        long_range_degree=4,
+    )
+    cue = normalize(rng.normal(size=10))
+
+    step = sheet.step({"signal": cue}, recurrent=False)
+
+    assert step.bundle.width == step.winner_indices.size
+    assert step.bundle.width > 1
+    np.testing.assert_array_equal(step.bundle.indices, step.winner_indices)
+    np.testing.assert_allclose(step.bundle.amplitudes, step.winner_activity)
+
+    projected = sheet.project_bundle(step.bundle)
+    assert projected.width > step.bundle.width * 2
+    assert projected.total_activity > 0.0
+
+
+def test_separate_broad_bundles_reconverge_by_summing_on_shared_targets():
+    sheet = FastCorticalSheet(
+        24,
+        24,
+        (StreamSpec("signal", 4, (0.50, 0.50)),),
+        seed=53,
+        local_degree=16,
+        long_range_degree=4,
+    )
+    left = SignalBundle(
+        np.arange(200, 212, dtype=np.int64),
+        np.linspace(0.5, 1.0, 12, dtype=np.float32),
+        1.0,
+    )
+    right = SignalBundle(
+        np.arange(212, 224, dtype=np.int64),
+        np.linspace(1.0, 0.5, 12, dtype=np.float32),
+        1.0,
+    )
+
+    left_out = sheet.project_bundle(left)
+    right_out = sheet.project_bundle(right)
+    merged = SignalBundle.merge((left_out, right_out), size=sheet.size, emitted_ms=2.0)
+
+    left_dense = left_out.as_dense(sheet.size)
+    right_dense = right_out.as_dense(sheet.size)
+    merged_dense = merged.as_dense(sheet.size)
+    shared = np.flatnonzero((left_dense > 0.0) & (right_dense > 0.0))
+
+    assert left_out.width > left.width
+    assert right_out.width > right.width
+    assert shared.size > 0
+    np.testing.assert_allclose(merged_dense, left_dense + right_dense, rtol=1e-6, atol=1e-7)
+    assert np.all(merged_dense[shared] > left_dense[shared])
+    assert np.all(merged_dense[shared] > right_dense[shared])
 
 
 def test_units_farther_from_anchored_inputs_have_longer_intrinsic_persistence():
