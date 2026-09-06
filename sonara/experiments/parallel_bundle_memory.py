@@ -21,14 +21,16 @@ class ParallelBundleMemoryNetwork:
     """
     Experimental DG/CA3 branch for a live broad-bundle cortical substrate.
 
-    Cortex remains the sole cortical owner. DG cells receive sparse excitatory
-    convergent combinations of a short decaying cortical-flow history; sparse
-    powerful DG->CA3 routes converge with a weaker direct cortical seed and CA3
-    recurrence; CA3 then emits a learned broad return toward cortex.
+    Cortex remains the sole cortical owner. Cortical bundles diverge through
+    registered excitatory edges into DG, DG expands/separates a short decaying
+    history of that live flow, sparse powerful DG->CA3 routes converge with a
+    weaker direct cortical seed and sparse recurrent CA3 routes, and CA3 emits
+    a learned broad return toward cortex.
 
-    Long-range cortical/DG afferents are excitatory. Separation and suppression
-    are owned by sparse convergence, competition, and homeostatic pressure
-    rather than arbitrary signed feed-forward weights.
+    Feed-forward and recurrent pyramidal routes remain excitatory. Separation
+    and suppression are owned by sparse connectivity, competition, homeostatic
+    pressure, and source-wise synaptic scaling rather than negative recurrent
+    pyramidal weights.
     """
 
     def __init__(
@@ -38,13 +40,15 @@ class ParallelBundleMemoryNetwork:
         cortical_winner_count: int,
         dg_size: int = 2048,
         dg_winner_count: int = 64,
-        dg_fan_in: int = 32,
+        dg_fan_out: int = 32,
         cortical_trace_decay: float = 0.75,
         ca3_size: int = 512,
         ca3_winner_count: int = 16,
         ca3_direct_seed_count: int = 4,
         ca3_direct_fan_out: int = 8,
         ca3_dg_fan_in: int = 24,
+        ca3_recurrent_fan_out: int = 24,
+        ca3_recurrent_output_budget: float = 1.0,
         cortical_return_width: int | None = None,
         dentate_gain: float = 2.0,
         direct_cortical_gain: float = 0.20,
@@ -55,20 +59,24 @@ class ParallelBundleMemoryNetwork:
         return_learning_rate: float = 0.12,
         seed: int = 0,
     ) -> None:
-        if cortical_size <= 0 or dg_size <= 0 or ca3_size <= 0:
-            raise ValueError("population sizes must be > 0")
+        if cortical_size <= 0 or dg_size <= 0 or ca3_size <= 1:
+            raise ValueError("population sizes must be > 0 and ca3_size must be > 1")
         if not 0 < cortical_winner_count <= cortical_size:
             raise ValueError("invalid cortical_winner_count")
         if not 0 < dg_winner_count <= dg_size:
             raise ValueError("invalid dg_winner_count")
-        if not 0 < dg_fan_in <= cortical_size:
-            raise ValueError("dg_fan_in must be in [1, cortical_size]")
         if not 0 <= cortical_trace_decay < 1.0:
             raise ValueError("cortical_trace_decay must be in [0, 1)")
         if not 0 < ca3_direct_seed_count <= ca3_winner_count <= ca3_size:
             raise ValueError("invalid CA3 winner/seed counts")
-        if ca3_dg_fan_in <= 0 or ca3_direct_fan_out <= 0:
+        if dg_fan_out <= 0 or ca3_dg_fan_in <= 0 or ca3_direct_fan_out <= 0:
             raise ValueError("fan-in/fan-out values must be > 0")
+        if not 0 < ca3_recurrent_fan_out < ca3_size:
+            raise ValueError("ca3_recurrent_fan_out must be in [1, ca3_size)")
+        if ca3_recurrent_output_budget <= 0.0:
+            raise ValueError("ca3_recurrent_output_budget must be > 0")
+        if dg_fan_out > dg_size:
+            raise ValueError("dg_fan_out cannot exceed dg_size")
         if ca3_direct_fan_out > ca3_size:
             raise ValueError("ca3_direct_fan_out cannot exceed ca3_size")
         if dentate_gain < 0.0 or direct_cortical_gain < 0.0 or recurrent_gain < 0.0:
@@ -78,12 +86,14 @@ class ParallelBundleMemoryNetwork:
         self.cortical_winner_count = int(cortical_winner_count)
         self.dg_size = int(dg_size)
         self.dg_winner_count = int(dg_winner_count)
-        self.dg_fan_in = int(dg_fan_in)
+        self.dg_fan_out = int(dg_fan_out)
         self.cortical_trace_decay = float(cortical_trace_decay)
         self.ca3_size = int(ca3_size)
         self.ca3_winner_count = int(ca3_winner_count)
         self.ca3_direct_seed_count = int(ca3_direct_seed_count)
         self.ca3_direct_fan_out = int(ca3_direct_fan_out)
+        self.ca3_recurrent_fan_out = int(ca3_recurrent_fan_out)
+        self.ca3_recurrent_output_budget = float(ca3_recurrent_output_budget)
         self.cortical_return_width = int(
             cortical_return_width
             if cortical_return_width is not None
@@ -98,36 +108,37 @@ class ParallelBundleMemoryNetwork:
         self.return_learning_rate = float(return_learning_rate)
         self.rng = np.random.default_rng(int(seed))
 
-        # Cortex -> DG is an explicit sparse excitatory graph. Each DG unit
-        # integrates a different conjunction of cortical sources. This preserves
-        # the universal propagation rule while giving DG genuine convergence to
-        # compete over rather than assigning each source a uniform fan-out.
-        dg_sources = np.empty((self.dg_size, self.dg_fan_in), dtype=np.int32)
-        for target_id in range(self.dg_size):
-            dg_sources[target_id] = self.rng.choice(
-                self.cortical_size,
-                size=self.dg_fan_in,
+        # Cortex -> DG: every active cortical source diverges through existing
+        # excitatory edges; DG competition chooses the sparse convergent result.
+        self.dg_source_edges = np.repeat(
+            np.arange(self.cortical_size, dtype=np.int32),
+            self.dg_fan_out,
+        )
+        dg_targets = np.empty((self.cortical_size, self.dg_fan_out), dtype=np.int32)
+        for source_id in range(self.cortical_size):
+            dg_targets[source_id] = self.rng.choice(
+                self.dg_size,
+                size=self.dg_fan_out,
                 replace=False,
             )
-        self.dg_source_edges = dg_sources.reshape(-1)
-        self.dg_target_edges = np.repeat(
-            np.arange(self.dg_size, dtype=np.int32),
-            self.dg_fan_in,
-        )
+        self.dg_target_edges = dg_targets.reshape(-1)
         dg_weights = self.rng.uniform(
             0.5,
             1.0,
-            size=(self.dg_size, self.dg_fan_in),
+            size=self.dg_source_edges.size,
         ).astype(np.float32)
-        dg_weights /= np.maximum(
-            np.linalg.norm(dg_weights, axis=1, keepdims=True),
-            1e-12,
+        target_norm = np.sqrt(
+            np.bincount(
+                self.dg_target_edges,
+                weights=np.square(dg_weights),
+                minlength=self.dg_size,
+            )
+        ).astype(np.float32)
+        self.dg_edge_weights = dg_weights / np.maximum(
+            target_norm[self.dg_target_edges], 1e-12
         )
-        self.dg_edge_weights = dg_weights.reshape(-1)
 
-        # Sparse direct cortical/entorhinal fan-out preserves source identity:
-        # shared active cortical cells send current down the same registered
-        # routes instead of being remixed through a dense random matrix.
+        # Direct cortical/entorhinal seed into CA3 is also a sparse projection.
         self.ca3_direct_source_edges = np.repeat(
             np.arange(self.cortical_size, dtype=np.int32),
             self.ca3_direct_fan_out,
@@ -153,8 +164,7 @@ class ParallelBundleMemoryNetwork:
         )
         self.ca3_direct_weights = direct_weights.reshape(-1)
 
-        # Mossy-fiber-like path: each CA3 unit samples only a small subset of
-        # the large sparse DG population.
+        # Mossy-fiber-like DG -> CA3 path: sparse, strong, excitatory fan-in.
         self.ca3_dg_sources = self.rng.integers(
             0,
             self.dg_size,
@@ -171,9 +181,31 @@ class ParallelBundleMemoryNetwork:
             1e-12,
         )
 
-        self.ca3_recurrent_weights = np.zeros(
-            (self.ca3_size, self.ca3_size), dtype=np.float32
+        # CA3 recurrence is a sparse structural graph. Weights begin silent and
+        # can only potentiate on existing source->target routes. Source-wise
+        # output scaling prevents one repeatedly active CA3 cell from acquiring
+        # unlimited recurrent authority over every learned coalition.
+        self.ca3_recurrent_source_edges = np.repeat(
+            np.arange(self.ca3_size, dtype=np.int32),
+            self.ca3_recurrent_fan_out,
         )
+        recurrent_targets = np.empty(
+            (self.ca3_size, self.ca3_recurrent_fan_out), dtype=np.int32
+        )
+        for source_id in range(self.ca3_size):
+            choices = self.rng.choice(
+                self.ca3_size - 1,
+                size=self.ca3_recurrent_fan_out,
+                replace=False,
+            )
+            choices = choices.astype(np.int32)
+            choices[choices >= source_id] += 1
+            recurrent_targets[source_id] = choices
+        self.ca3_recurrent_target_edges = recurrent_targets.reshape(-1)
+        self.ca3_recurrent_weights = np.zeros(
+            self.ca3_recurrent_source_edges.size, dtype=np.float32
+        )
+
         self.cortical_return_weights = np.zeros(
             (self.cortical_size, self.ca3_size), dtype=np.float32
         )
@@ -247,11 +279,19 @@ class ParallelBundleMemoryNetwork:
         return self._top_bundle(scores, self.dg_winner_count, emitted_ms)
 
     def _direct_cortical_scores(self, cortical: np.ndarray) -> np.ndarray:
-        edge_signal = (
-            self.ca3_direct_weights * cortical[self.ca3_direct_source_edges]
-        )
+        edge_signal = self.ca3_direct_weights * cortical[self.ca3_direct_source_edges]
         return np.bincount(
             self.ca3_direct_target_edges,
+            weights=edge_signal,
+            minlength=self.ca3_size,
+        ).astype(np.float32)
+
+    def _recurrent_ca3_scores(self, ca3: np.ndarray) -> np.ndarray:
+        edge_signal = (
+            self.ca3_recurrent_weights * ca3[self.ca3_recurrent_source_edges]
+        )
+        return np.bincount(
+            self.ca3_recurrent_target_edges,
             weights=edge_signal,
             minlength=self.ca3_size,
         ).astype(np.float32)
@@ -274,7 +314,7 @@ class ParallelBundleMemoryNetwork:
         scores = self.dentate_gain * mossy_scores
         scores += self.direct_cortical_gain * self._direct_cortical_scores(cortical)
         if previous_ca3.width:
-            scores += self.recurrent_gain * (self.ca3_recurrent_weights @ ca3)
+            scores += self.recurrent_gain * self._recurrent_ca3_scores(ca3)
         scores /= 1.0 + self.ca3_homeostatic_pressure * self.ca3_usage
 
         count = (
@@ -358,29 +398,40 @@ class ParallelBundleMemoryNetwork:
         self._learn_mossy_afferents(previous_dentate, next_ca3)
         self._learn_direct_cortical_afferents(cortical_bundle, next_ca3)
 
-    def _learn_competitive_recurrence(
+    def _learn_recurrent_routes(
         self,
         previous_ca3: SignalBundle,
         next_ca3: SignalBundle,
     ) -> None:
         if previous_ca3.width == 0 or next_ca3.width == 0:
             return
-        source_amplitudes = previous_ca3.amplitudes.astype(np.float32)
-        target_activity = next_ca3.as_dense(self.ca3_size)
-        expected_activity = float(next_ca3.width / self.ca3_size)
-        centered_target = target_activity - expected_activity
-        delta = self.recurrent_learning_rate * np.outer(
-            centered_target,
-            source_amplitudes,
-        ).astype(np.float32)
-        self.ca3_recurrent_weights[:, previous_ca3.indices] += delta
-        np.clip(
-            self.ca3_recurrent_weights,
-            -1.0,
-            1.0,
-            out=self.ca3_recurrent_weights,
+        previous = previous_ca3.as_dense(self.ca3_size)
+        current = next_ca3.as_dense(self.ca3_size)
+        source_strength = previous[self.ca3_recurrent_source_edges]
+        target_strength = current[self.ca3_recurrent_target_edges]
+        eligible = (source_strength > 0.0) & (target_strength > 0.0)
+        if np.any(eligible):
+            coactivity = source_strength[eligible] * target_strength[eligible]
+            self.ca3_recurrent_weights[eligible] += (
+                self.recurrent_learning_rate
+                * coactivity
+                * (1.0 - self.ca3_recurrent_weights[eligible])
+            )
+
+        # Synaptic scaling preserves a finite recurrent output budget per CA3
+        # source. Potentiating one coalition therefore reduces relative support
+        # for alternatives without requiring negative pyramidal synapses.
+        rows = self.ca3_recurrent_weights.reshape(
+            self.ca3_size, self.ca3_recurrent_fan_out
         )
-        np.fill_diagonal(self.ca3_recurrent_weights, 0.0)
+        totals = np.sum(rows, axis=1, keepdims=True)
+        scale = np.ones_like(totals)
+        over_budget = totals[:, 0] > self.ca3_recurrent_output_budget
+        scale[over_budget, 0] = (
+            self.ca3_recurrent_output_budget / totals[over_budget, 0]
+        )
+        rows *= scale
+        np.clip(rows, 0.0, 1.0, out=rows)
 
     def _learn_cortical_return(
         self,
@@ -430,7 +481,7 @@ class ParallelBundleMemoryNetwork:
 
         if learn:
             self._learn_ca3_afferents(previous_dentate, cortical_bundle, next_ca3)
-            self._learn_competitive_recurrence(previous_ca3, next_ca3)
+            self._learn_recurrent_routes(previous_ca3, next_ca3)
             self._learn_cortical_return(previous_ca3, cortical_bundle)
 
         self.ca3_usage = (
