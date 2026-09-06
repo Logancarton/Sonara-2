@@ -22,8 +22,9 @@ class ParallelBundleMemoryNetwork:
     Experimental DG/CA3 branch for a live broad-bundle cortical substrate.
 
     Cortex remains the sole cortical owner. DG expands/separates its bundle;
-    sparse powerful DG->CA3 routes converge with a weaker direct cortical seed
-    and CA3 recurrence; CA3 then emits a learned broad return toward cortex.
+    sparse powerful DG->CA3 routes converge with a weaker direct cortical
+    bundle and CA3 recurrence; CA3 then emits a learned broad return toward
+    cortex.
 
     Long-range cortical/DG afferents are excitatory. Separation and suppression
     are owned by sparse competition and homeostatic pressure rather than by
@@ -40,7 +41,6 @@ class ParallelBundleMemoryNetwork:
         dg_fan_in: int = 32,
         ca3_size: int = 512,
         ca3_winner_count: int = 16,
-        ca3_direct_seed_count: int = 4,
         ca3_dg_fan_in: int = 24,
         cortical_return_width: int | None = None,
         dentate_gain: float = 2.0,
@@ -58,8 +58,8 @@ class ParallelBundleMemoryNetwork:
             raise ValueError("invalid cortical_winner_count")
         if not 0 < dg_winner_count <= dg_size:
             raise ValueError("invalid dg_winner_count")
-        if not 0 < ca3_direct_seed_count <= ca3_winner_count <= ca3_size:
-            raise ValueError("invalid CA3 winner/seed counts")
+        if not 0 < ca3_winner_count <= ca3_size:
+            raise ValueError("invalid CA3 winner count")
         if dg_fan_in <= 0 or ca3_dg_fan_in <= 0:
             raise ValueError("fan-in values must be > 0")
         if dentate_gain < 0.0 or direct_cortical_gain < 0.0 or recurrent_gain < 0.0:
@@ -71,7 +71,6 @@ class ParallelBundleMemoryNetwork:
         self.dg_winner_count = int(dg_winner_count)
         self.ca3_size = int(ca3_size)
         self.ca3_winner_count = int(ca3_winner_count)
-        self.ca3_direct_seed_count = int(ca3_direct_seed_count)
         self.cortical_return_width = int(
             cortical_return_width
             if cortical_return_width is not None
@@ -218,13 +217,7 @@ class ParallelBundleMemoryNetwork:
         if previous_ca3.width:
             scores += self.recurrent_gain * (self.ca3_recurrent_weights @ ca3)
         scores /= 1.0 + self.ca3_homeostatic_pressure * self.ca3_usage
-
-        count = (
-            self.ca3_winner_count
-            if previous_dentate.width or previous_ca3.width
-            else self.ca3_direct_seed_count
-        )
-        return self._top_bundle(scores, count, emitted_ms)
+        return self._top_bundle(scores, self.ca3_winner_count, emitted_ms)
 
     def _cortical_return(
         self,
