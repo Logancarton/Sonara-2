@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable
 
 import numpy as np
 
@@ -9,23 +8,23 @@ from .cortical_sheet import SignalBundle
 
 
 @dataclass(frozen=True)
-class ParallelBundleStep:
-    """One synchronous update of cortex, DG-like, and CA3-like bundle states."""
+class ParallelBundleMemoryStep:
+    """One synchronous hippocampal-branch update from a live cortical bundle."""
 
     time_ms: float
-    cortical: SignalBundle
     dentate: SignalBundle
     ca3: SignalBundle
+    cortical_return: SignalBundle
 
 
 class ParallelBundleMemoryNetwork:
     """
-    Experimental parallel bundle memory substrate.
+    Experimental DG/CA3 branch for a live broad-bundle cortical substrate.
 
-    Cortex, DG-like expansion, CA3-like recurrence, and cortical return all
-    advance from the previous tick's bundle state. The hippocampal branch never
-    blocks cortical propagation and there is no episode/trace chooser.
-    Learning is local co-activity plus competitive afferent/recurrent plasticity.
+    This object does not own or copy cortex. On every neural tick it receives
+    the live cortical SignalBundle, advances DG and CA3 from prior-tick state,
+    and emits a learned sparse return bundle toward cortex. Cortex remains free
+    to continue its own recurrent propagation at the same time.
     """
 
     def __init__(
@@ -33,7 +32,6 @@ class ParallelBundleMemoryNetwork:
         cortical_size: int,
         *,
         cortical_winner_count: int,
-        cortical_projector: Callable[[SignalBundle], SignalBundle] | None = None,
         dg_size: int = 2048,
         dg_winner_count: int = 64,
         dg_fan_in: int = 32,
@@ -41,9 +39,6 @@ class ParallelBundleMemoryNetwork:
         ca3_winner_count: int = 16,
         cortical_return_width: int | None = None,
         recurrent_gain: float = 1.6,
-        cortical_recurrence_gain: float = 0.75,
-        cortical_return_gain: float = 1.25,
-        cortical_persistence: float = 0.35,
         ca3_homeostatic_pressure: float = 6.0,
         afferent_learning_rate: float = 0.08,
         recurrent_learning_rate: float = 0.12,
@@ -63,7 +58,6 @@ class ParallelBundleMemoryNetwork:
 
         self.cortical_size = int(cortical_size)
         self.cortical_winner_count = int(cortical_winner_count)
-        self.cortical_projector = cortical_projector
         self.dg_size = int(dg_size)
         self.dg_winner_count = int(dg_winner_count)
         self.ca3_size = int(ca3_size)
@@ -74,9 +68,6 @@ class ParallelBundleMemoryNetwork:
             else min(self.cortical_size, self.cortical_winner_count * 4)
         )
         self.recurrent_gain = float(recurrent_gain)
-        self.cortical_recurrence_gain = float(cortical_recurrence_gain)
-        self.cortical_return_gain = float(cortical_return_gain)
-        self.cortical_persistence = float(cortical_persistence)
         self.ca3_homeostatic_pressure = float(ca3_homeostatic_pressure)
         self.afferent_learning_rate = float(afferent_learning_rate)
         self.recurrent_learning_rate = float(recurrent_learning_rate)
@@ -121,29 +112,14 @@ class ParallelBundleMemoryNetwork:
         self.ca3_usage = np.zeros(self.ca3_size, dtype=np.float32)
 
         self.time_ms = 0.0
-        self.cortical = self._empty_bundle(self.cortical_size)
-        self.dentate = self._empty_bundle(self.dg_size)
-        self.ca3 = self._empty_bundle(self.ca3_size)
+        self.dentate = self._empty_bundle()
+        self.ca3 = self._empty_bundle()
 
-    def _empty_bundle(self, _size: int) -> SignalBundle:
+    def _empty_bundle(self) -> SignalBundle:
         return SignalBundle(
             np.empty(0, dtype=np.int64),
             np.empty(0, dtype=np.float32),
             self.time_ms,
-        )
-
-    @staticmethod
-    def _scale(bundle: SignalBundle, gain: float, emitted_ms: float) -> SignalBundle:
-        if bundle.width == 0 or gain <= 0.0:
-            return SignalBundle(
-                np.empty(0, dtype=np.int64),
-                np.empty(0, dtype=np.float32),
-                emitted_ms,
-            )
-        return SignalBundle(
-            bundle.indices,
-            bundle.amplitudes * float(gain),
-            emitted_ms,
         )
 
     @staticmethod
@@ -172,14 +148,17 @@ class ParallelBundleMemoryNetwork:
 
     def reset_dynamic(self, *, reset_usage: bool = False) -> None:
         self.time_ms = 0.0
-        self.cortical = self._empty_bundle(self.cortical_size)
-        self.dentate = self._empty_bundle(self.dg_size)
-        self.ca3 = self._empty_bundle(self.ca3_size)
+        self.dentate = self._empty_bundle()
+        self.ca3 = self._empty_bundle()
         if reset_usage:
             self.ca3_usage.fill(0.0)
 
-    def _dentate_from_cortex(self, bundle: SignalBundle, emitted_ms: float) -> SignalBundle:
-        cortical = bundle.as_dense(self.cortical_size)
+    def _dentate_from_cortex(
+        self,
+        cortical_bundle: SignalBundle,
+        emitted_ms: float,
+    ) -> SignalBundle:
+        cortical = cortical_bundle.as_dense(self.cortical_size)
         scores = np.sum(
             self._dg_weights * cortical[self._dg_sources],
             axis=1,
@@ -188,11 +167,11 @@ class ParallelBundleMemoryNetwork:
 
     def _ca3_from_previous(
         self,
-        dentate: SignalBundle,
+        previous_dentate: SignalBundle,
         previous_ca3: SignalBundle,
         emitted_ms: float,
     ) -> SignalBundle:
-        dg = dentate.as_dense(self.dg_size)
+        dg = previous_dentate.as_dense(self.dg_size)
         ca3 = previous_ca3.as_dense(self.ca3_size)
         scores = self.ca3_afferent_weights @ dg
         if previous_ca3.width:
@@ -200,27 +179,19 @@ class ParallelBundleMemoryNetwork:
         scores /= 1.0 + self.ca3_homeostatic_pressure * self.ca3_usage
         return self._top_bundle(scores, self.ca3_winner_count, emitted_ms)
 
-    def _cortical_return(self, ca3: SignalBundle, emitted_ms: float) -> SignalBundle:
-        if ca3.width == 0:
-            return self._empty_bundle(self.cortical_size)
-        scores = self.cortical_return_weights @ ca3.as_dense(self.ca3_size)
+    def _cortical_return(
+        self,
+        ca3_bundle: SignalBundle,
+        emitted_ms: float,
+    ) -> SignalBundle:
+        if ca3_bundle.width == 0:
+            return SignalBundle(
+                np.empty(0, dtype=np.int64),
+                np.empty(0, dtype=np.float32),
+                emitted_ms,
+            )
+        scores = self.cortical_return_weights @ ca3_bundle.as_dense(self.ca3_size)
         return self._top_bundle(scores, self.cortical_return_width, emitted_ms)
-
-    @staticmethod
-    def _hebbian_saturating_update(
-        weights: np.ndarray,
-        target_indices: np.ndarray,
-        source_indices: np.ndarray,
-        target_amplitudes: np.ndarray,
-        source_amplitudes: np.ndarray,
-        learning_rate: float,
-    ) -> None:
-        if target_indices.size == 0 or source_indices.size == 0:
-            return
-        block = weights[np.ix_(target_indices, source_indices)]
-        coactivity = np.outer(target_amplitudes, source_amplitudes).astype(np.float32)
-        block += float(learning_rate) * coactivity * (1.0 - block)
-        weights[np.ix_(target_indices, source_indices)] = np.clip(block, 0.0, 1.0)
 
     def _specialize_ca3_afferents(
         self,
@@ -230,18 +201,18 @@ class ParallelBundleMemoryNetwork:
         if dentate.width == 0 or ca3.width == 0:
             return
         source = dentate.as_dense(self.dg_size)
-        source_norm = float(np.linalg.norm(source))
-        if source_norm <= 1e-12:
+        norm = float(np.linalg.norm(source))
+        if norm <= 1e-12:
             return
-        target_pattern = source / source_norm
-        target_pattern -= float(np.mean(target_pattern))
-        target_pattern /= max(float(np.linalg.norm(target_pattern)), 1e-12)
+        pattern = source / norm
+        pattern -= float(np.mean(pattern))
+        pattern /= max(float(np.linalg.norm(pattern)), 1e-12)
 
         rows = self.ca3_afferent_weights[ca3.indices]
         eta = (
             self.afferent_learning_rate * ca3.amplitudes.astype(np.float32)
         )[:, None]
-        updated = (1.0 - eta) * rows + eta * target_pattern[None, :]
+        updated = (1.0 - eta) * rows + eta * pattern[None, :]
         updated -= np.mean(updated, axis=1, keepdims=True)
         updated /= np.maximum(
             np.linalg.norm(updated, axis=1, keepdims=True),
@@ -264,157 +235,70 @@ class ParallelBundleMemoryNetwork:
             centered_target,
             source_amplitudes,
         ).astype(np.float32)
-        columns = previous_ca3.indices
-        self.ca3_recurrent_weights[:, columns] += delta
-        np.clip(self.ca3_recurrent_weights, -1.0, 1.0, out=self.ca3_recurrent_weights)
+        self.ca3_recurrent_weights[:, previous_ca3.indices] += delta
+        np.clip(
+            self.ca3_recurrent_weights,
+            -1.0,
+            1.0,
+            out=self.ca3_recurrent_weights,
+        )
         np.fill_diagonal(self.ca3_recurrent_weights, 0.0)
 
-    def _learn_local_routes(
+    def _learn_cortical_return(
         self,
-        previous_dentate: SignalBundle,
         previous_ca3: SignalBundle,
-        next_ca3: SignalBundle,
-        next_cortical: SignalBundle,
+        cortical_bundle: SignalBundle,
     ) -> None:
-        self._specialize_ca3_afferents(previous_dentate, next_ca3)
-        self._learn_competitive_recurrence(previous_ca3, next_ca3)
-        self._hebbian_saturating_update(
-            self.cortical_return_weights,
-            next_cortical.indices,
-            previous_ca3.indices,
-            next_cortical.amplitudes,
+        if previous_ca3.width == 0 or cortical_bundle.width == 0:
+            return
+        block = self.cortical_return_weights[
+            np.ix_(cortical_bundle.indices, previous_ca3.indices)
+        ]
+        coactivity = np.outer(
+            cortical_bundle.amplitudes,
             previous_ca3.amplitudes,
-            self.return_learning_rate,
-        )
+        ).astype(np.float32)
+        block += self.return_learning_rate * coactivity * (1.0 - block)
+        self.cortical_return_weights[
+            np.ix_(cortical_bundle.indices, previous_ca3.indices)
+        ] = np.clip(block, 0.0, 1.0)
 
     def advance(
         self,
-        external_cortical: SignalBundle | None = None,
+        cortical_bundle: SignalBundle,
         *,
         learn: bool = False,
-        memory_return: bool = True,
         dt_ms: float = 1.0,
-    ) -> ParallelBundleStep:
+    ) -> ParallelBundleMemoryStep:
         if dt_ms <= 0.0:
             raise ValueError("dt_ms must be > 0")
+        if cortical_bundle.width and int(np.max(cortical_bundle.indices)) >= self.cortical_size:
+            raise IndexError("cortical bundle outside cortical population")
+
         self.time_ms += float(dt_ms)
         now = self.time_ms
-
-        previous_cortical = self.cortical
         previous_dentate = self.dentate
         previous_ca3 = self.ca3
 
-        cortical_components: list[SignalBundle] = []
-        if external_cortical is not None:
-            if external_cortical.width and int(np.max(external_cortical.indices)) >= self.cortical_size:
-                raise IndexError("external cortical bundle outside cortical population")
-            cortical_components.append(self._scale(external_cortical, 1.0, now))
-        if previous_cortical.width:
-            cortical_components.append(
-                self._scale(previous_cortical, self.cortical_persistence, now)
-            )
-            if self.cortical_projector is not None:
-                cortical_components.append(
-                    self._scale(
-                        self.cortical_projector(previous_cortical),
-                        self.cortical_recurrence_gain,
-                        now,
-                    )
-                )
-        if memory_return and previous_ca3.width:
-            cortical_components.append(
-                self._scale(
-                    self._cortical_return(previous_ca3, now),
-                    self.cortical_return_gain,
-                    now,
-                )
-            )
-
-        if cortical_components:
-            merged = SignalBundle.merge(
-                cortical_components,
-                size=self.cortical_size,
-                emitted_ms=now,
-            )
-            next_cortical = self._top_bundle(
-                merged.as_dense(self.cortical_size),
-                self.cortical_winner_count,
-                now,
-            )
-        else:
-            next_cortical = self._empty_bundle(self.cortical_size)
-
-        next_dentate = self._dentate_from_cortex(previous_cortical, now)
+        cortical_return = self._cortical_return(previous_ca3, now)
+        next_dentate = self._dentate_from_cortex(cortical_bundle, now)
         next_ca3 = self._ca3_from_previous(previous_dentate, previous_ca3, now)
 
         if learn:
-            self._learn_local_routes(
-                previous_dentate,
-                previous_ca3,
-                next_ca3,
-                next_cortical,
-            )
+            self._specialize_ca3_afferents(previous_dentate, next_ca3)
+            self._learn_competitive_recurrence(previous_ca3, next_ca3)
+            self._learn_cortical_return(previous_ca3, cortical_bundle)
 
         self.ca3_usage = (
             0.995 * self.ca3_usage
-            + 0.005 * np.isin(
-                np.arange(self.ca3_size), next_ca3.indices
-            ).astype(np.float32)
+            + 0.005
+            * np.isin(np.arange(self.ca3_size), next_ca3.indices).astype(np.float32)
         )
-        self.cortical = next_cortical
         self.dentate = next_dentate
         self.ca3 = next_ca3
-        return ParallelBundleStep(now, self.cortical, self.dentate, self.ca3)
-
-    def learn_experience(
-        self,
-        cortical_bundle: SignalBundle,
-        *,
-        steps: int = 8,
-        driven_steps: int = 5,
-    ) -> None:
-        if steps <= 0 or not 0 < driven_steps <= steps:
-            raise ValueError("require steps > 0 and 0 < driven_steps <= steps")
-        self.reset_dynamic()
-        for tick in range(steps):
-            self.advance(
-                cortical_bundle if tick < driven_steps else None,
-                learn=True,
-            )
-
-    def recall_trajectory(
-        self,
-        cortical_bundle: SignalBundle,
-        *,
-        steps: int = 10,
-        driven_steps: int = 2,
-        memory_return: bool = True,
-    ) -> tuple[ParallelBundleStep, ...]:
-        if steps <= 0 or not 0 < driven_steps <= steps:
-            raise ValueError("require steps > 0 and 0 < driven_steps <= steps")
-        self.reset_dynamic()
-        trajectory: list[ParallelBundleStep] = []
-        for tick in range(steps):
-            trajectory.append(
-                self.advance(
-                    cortical_bundle if tick < driven_steps else None,
-                    learn=False,
-                    memory_return=memory_return,
-                )
-            )
-        return tuple(trajectory)
-
-    def recall(
-        self,
-        cortical_bundle: SignalBundle,
-        *,
-        steps: int = 10,
-        driven_steps: int = 2,
-        memory_return: bool = True,
-    ) -> ParallelBundleStep:
-        return self.recall_trajectory(
-            cortical_bundle,
-            steps=steps,
-            driven_steps=driven_steps,
-            memory_return=memory_return,
-        )[-1]
+        return ParallelBundleMemoryStep(
+            time_ms=now,
+            dentate=next_dentate,
+            ca3=next_ca3,
+            cortical_return=cortical_return,
+        )
