@@ -24,6 +24,10 @@ class ParallelBundleMemoryNetwork:
     Cortex remains the sole cortical owner. DG expands/separates its bundle;
     sparse powerful DG->CA3 routes converge with a weaker direct cortical seed
     and CA3 recurrence; CA3 then emits a learned broad return toward cortex.
+
+    Long-range cortical/DG afferents are excitatory. Separation and suppression
+    are owned by sparse competition and homeostatic pressure rather than by
+    embedding arbitrary negative weights in excitatory anatomical pathways.
     """
 
     def __init__(
@@ -88,12 +92,14 @@ class ParallelBundleMemoryNetwork:
             size=(self.dg_size, dg_fan_in),
             dtype=np.int32,
         )
-        self._dg_weights = self.rng.normal(
-            0.0,
+        # Entorhinal/cortical afferents are excitatory. Random sparse fan-in plus
+        # k-winner competition provides expansion and separation without using
+        # negative synapses to stand in for inhibition.
+        self._dg_weights = self.rng.uniform(
+            0.5,
             1.0,
             size=(self.dg_size, dg_fan_in),
         ).astype(np.float32)
-        self._dg_weights -= np.mean(self._dg_weights, axis=1, keepdims=True)
         self._dg_weights /= np.maximum(
             np.linalg.norm(self._dg_weights, axis=1, keepdims=True),
             1e-12,
@@ -119,7 +125,7 @@ class ParallelBundleMemoryNetwork:
             1e-12,
         )
 
-        self.ca3_direct_cortical_weights = self._random_zero_mean_rows(
+        self.ca3_direct_cortical_weights = self._random_excitatory_rows(
             self.ca3_size,
             self.cortical_size,
         )
@@ -135,9 +141,8 @@ class ParallelBundleMemoryNetwork:
         self.dentate = self._empty_bundle()
         self.ca3 = self._empty_bundle()
 
-    def _random_zero_mean_rows(self, rows: int, columns: int) -> np.ndarray:
-        weights = self.rng.normal(0.0, 1.0, size=(rows, columns)).astype(np.float32)
-        weights -= np.mean(weights, axis=1, keepdims=True)
+    def _random_excitatory_rows(self, rows: int, columns: int) -> np.ndarray:
+        weights = self.rng.uniform(0.0, 1.0, size=(rows, columns)).astype(np.float32)
         weights /= np.maximum(np.linalg.norm(weights, axis=1, keepdims=True), 1e-12)
         return weights
 
@@ -244,16 +249,15 @@ class ParallelBundleMemoryNetwork:
     ) -> None:
         if winners.width == 0:
             return
-        norm = float(np.linalg.norm(source))
+        pattern = np.maximum(source.astype(np.float32), 0.0)
+        norm = float(np.linalg.norm(pattern))
         if norm <= 1e-12:
             return
-        pattern = source.astype(np.float32) / norm
-        pattern -= float(np.mean(pattern))
-        pattern /= max(float(np.linalg.norm(pattern)), 1e-12)
+        pattern /= norm
         rows = weights[winners.indices]
         eta = (learning_rate * winners.amplitudes.astype(np.float32))[:, None]
         updated = (1.0 - eta) * rows + eta * pattern[None, :]
-        updated -= np.mean(updated, axis=1, keepdims=True)
+        np.maximum(updated, 0.0, out=updated)
         updated /= np.maximum(
             np.linalg.norm(updated, axis=1, keepdims=True),
             1e-12,
