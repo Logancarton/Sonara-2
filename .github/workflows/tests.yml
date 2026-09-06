@@ -32,3 +32,6 @@ jobs:
 
       - name: Stage 1 learned assembly gate
         run: python -m examples.learned_assembly
+
+      - name: Experimental cortical-sheet probe
+        run: python -m examples.cortical_sheet_hypothesis
