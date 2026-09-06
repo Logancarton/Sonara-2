@@ -95,8 +95,11 @@ def test_live_sheet_emits_a_broad_population_bundle_not_a_single_cell_trail():
 
     assert step.bundle.width == step.winner_indices.size
     assert step.bundle.width > 1
-    np.testing.assert_array_equal(step.bundle.indices, step.winner_indices)
-    np.testing.assert_allclose(step.bundle.amplitudes, step.winner_activity)
+    np.testing.assert_array_equal(
+        np.sort(step.bundle.indices),
+        np.sort(step.winner_indices),
+    )
+    np.testing.assert_allclose(step.bundle.as_dense(sheet.size), sheet.activity)
 
     projected = sheet.project_bundle(step.bundle)
     assert projected.width > step.bundle.width * 2
