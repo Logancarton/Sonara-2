@@ -63,6 +63,58 @@ def _trained_parallel_system(
     return rng, sheet, memory, sensory, other
 
 
+def _mean_between(assemblies: list[np.ndarray], budget: int) -> float:
+    values: list[float] = []
+    for left in range(len(assemblies)):
+        for right in range(left + 1, len(assemblies)):
+            values.append(assembly_overlap(assemblies[left], assemblies[right], budget))
+    return float(np.mean(values)) if values else 0.0
+
+
+def parallel_bundle_separation_diagnostic(seed: int) -> tuple[float, float, float]:
+    """Measure where distinct full experiences collapse along the parallel path."""
+    feature_size = 12
+    families = 6
+    rng, sheet, memory, sensory, other = _trained_parallel_system(seed)
+
+    dg_references: list[np.ndarray] = []
+    initial_ca3_references: list[np.ndarray] = []
+    settled_ca3_references: list[np.ndarray] = []
+
+    for family in range(families):
+        sheet.reset_state()
+        sheet.settle(
+            noisy_experience(
+                rng,
+                sensory,
+                other,
+                family,
+                feature_size,
+                ("sensory", "context", "body", "time"),
+                noise=0.02,
+            ),
+            cue_steps=5,
+            recurrent=True,
+        )
+        full_bundle = sheet.current_bundle()
+
+        memory.reset_dynamic()
+        memory.advance(full_bundle)
+        second = memory.advance(full_bundle)
+        third = memory.advance(full_bundle)
+        dg_references.append(second.dentate.indices.copy())
+        initial_ca3_references.append(third.ca3.indices.copy())
+        settled_ca3_references.append(
+            memory.recall(full_bundle, steps=10, driven_steps=3).ca3.indices.copy()
+        )
+
+    return (
+        _mean_between(dg_references, memory.dg_winner_count),
+        _mean_between(initial_ca3_references, memory.ca3_winner_count),
+        _mean_between(settled_ca3_references, memory.ca3_winner_count),
+    )
+
+
 def parallel_bundle_completion_trial(seed: int) -> tuple[float, float, float, float]:
     """
     Evaluate distributed cortical and CA3 identity recovery from a partial cue.
